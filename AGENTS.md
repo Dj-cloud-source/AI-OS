@@ -522,7 +522,7 @@ Before implementing:
 
 1. Read PROJECT.md
 
-2. Read ARCHITECTURE.md
+2. Read docs/ARCHITECTURE.md
 
 3. Read AGENT.md
 

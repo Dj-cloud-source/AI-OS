@@ -3,8 +3,9 @@
 Status: Phase 0 implemented; Phases 1–11 planned
 
 This roadmap defines the implementation order for the local-first AIOps Agent
-Runtime. It is subordinate to `VISION.md`, `PHILOSOPHY.md`,
-`ARCHITECTURE.md`, `STATE_MACHINE.md`, `TOOL_SPEC.md`, and `AGENTS.md`.
+Runtime. It is subordinate to `docs/VISION.md`, `docs/PHILOSOPHY.md`,
+`docs/ARCHITECTURE.md`, `docs/STATE_MACHINE.md`, `docs/TOOL_SPEC.md`, and
+`AGENTS.md`.
 
 Phase 0 now contains only the approved local Mock Runtime. Phases 1–11 remain
 planned; no SSH, model, database, container, or real server capability is
