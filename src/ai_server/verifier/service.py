@@ -1,9 +1,11 @@
 """Deterministic Phase 0 Verifier."""
 
-from pydantic import ValidationError
-
-from ai_server.models.execution import ExecutionPlan
-from ai_server.models.system_status import SystemStatus
+from ai_server.models.execution import ExecutionPlan, ExecutionStep
+from ai_server.models.system_status import (
+    GetSystemStatusArguments,
+    ServiceStatus,
+    SystemStatus,
+)
 from ai_server.models.tool import ToolResult
 from ai_server.runtime.errors import VerificationError
 
@@ -18,23 +20,40 @@ class Verifier:
     ) -> None:
         """Raise an explicit error unless all mock evidence matches the plan."""
         try:
-            if not isinstance(plan, ExecutionPlan):
+            if (
+                type(plan) is not ExecutionPlan
+                or type(plan.steps) is not tuple
+                or any(
+                    type(step) is not ExecutionStep
+                    or type(step.arguments) is not GetSystemStatusArguments
+                    for step in plan.steps
+                )
+            ):
                 raise TypeError
             plan = ExecutionPlan.model_validate(
                 plan.model_dump(mode="python", warnings="none"),
                 strict=True,
             )
-        except (TypeError, ValidationError):
+        except Exception:
             raise VerificationError("Verification received a malformed plan") from None
 
         if not plan.steps:
             raise VerificationError("Verification cannot accept an empty plan")
+        if type(results) is not tuple:
+            raise VerificationError("Verification evidence container is malformed")
         if len(results) != len(plan.steps):
             raise VerificationError("Verification evidence count does not match the plan")
 
         for step, raw_result in zip(plan.steps, results, strict=True):
             try:
-                if not isinstance(raw_result, ToolResult):
+                if (
+                    type(raw_result) is not ToolResult[SystemStatus]
+                    or type(raw_result.data) is not SystemStatus
+                    or type(raw_result.data.services) is not tuple
+                    or any(
+                        type(service) is not ServiceStatus for service in raw_result.data.services
+                    )
+                ):
                     raise VerificationError("Verification evidence is malformed")
                 result = ToolResult[SystemStatus].model_validate(
                     raw_result.model_dump(mode="python", warnings="none"),

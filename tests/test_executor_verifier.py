@@ -35,16 +35,20 @@ def test_executor_invokes_bound_tool_exactly_once() -> None:
 
 def test_executor_does_not_retry_explicit_tool_failure() -> None:
     calls = 0
+    marker = "SENSITIVE_EXPLICIT_TOOL_FAILURE"
 
     def failing_tool(arguments: GetSystemStatusArguments) -> ToolResult[SystemStatus]:
         nonlocal calls
         calls += 1
         del arguments
-        raise ToolExecutionError("simulated Tool failure")
+        raise ToolExecutionError(marker)
 
-    with pytest.raises(ToolExecutionError):
+    with pytest.raises(ToolExecutionError, match="Tool invocation failed safely") as caught:
         Executor(system_status_tool=failing_tool).execute(make_plan())
+
     assert calls == 1
+    assert marker not in str(caught.value)
+    assert caught.value.__cause__ is None
 
 
 def test_executor_wraps_unexpected_tool_failure_without_retrying() -> None:
@@ -111,6 +115,25 @@ def test_executor_rejects_forged_empty_plan_without_calling_tool() -> None:
     assert calls == 0
 
 
+def test_executor_wraps_plan_serialization_failure_without_leaking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "SENSITIVE_EXECUTOR_PLAN_MARKER"
+    plan = make_plan()
+
+    def exploding_model_dump(*args: object, **kwargs: object) -> dict[str, object]:
+        del args, kwargs
+        raise RuntimeError(marker)
+
+    monkeypatch.setattr(ExecutionPlan, "model_dump", exploding_model_dump)
+
+    with pytest.raises(ToolExecutionError, match="malformed plan") as caught:
+        Executor().execute(plan)
+
+    assert marker not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
 def test_verifier_accepts_existing_structured_evidence_without_new_tool_call() -> None:
     calls = 0
 
@@ -162,4 +185,42 @@ def test_verifier_rejects_malformed_evidence_with_explicit_error() -> None:
     with pytest.raises(VerificationError, match="evidence is malformed") as caught:
         Verifier().verify(make_plan(), malformed)
 
+    assert caught.value.__cause__ is None
+
+
+def test_verifier_wraps_plan_serialization_failure_without_leaking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "SENSITIVE_VERIFIER_PLAN_MARKER"
+    plan = make_plan()
+
+    def exploding_model_dump(*args: object, **kwargs: object) -> dict[str, object]:
+        del args, kwargs
+        raise RuntimeError(marker)
+
+    monkeypatch.setattr(ExecutionPlan, "model_dump", exploding_model_dump)
+
+    with pytest.raises(VerificationError, match="malformed plan") as caught:
+        Verifier().verify(plan, ())
+
+    assert marker not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
+def test_verifier_rejects_tuple_subclass_before_magic_methods_can_run() -> None:
+    marker = "SENSITIVE_RESULTS_CONTAINER_MARKER"
+
+    class ExplodingResults(tuple[object, ...]):
+        def __len__(self) -> int:
+            raise RuntimeError(marker)
+
+    results = cast(
+        tuple[ToolResult[SystemStatus], ...],
+        ExplodingResults(),
+    )
+
+    with pytest.raises(VerificationError, match="container is malformed") as caught:
+        Verifier().verify(make_plan(), results)
+
+    assert marker not in str(caught.value)
     assert caught.value.__cause__ is None

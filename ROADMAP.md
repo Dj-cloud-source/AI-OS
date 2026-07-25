@@ -1,15 +1,15 @@
 # AIOps Agent Runtime Roadmap
 
-Status: Phase 0 implemented; Phases 1–11 planned
+Status: Phases 0–1 implemented; Phases 2–11 planned
 
 This roadmap defines the implementation order for the local-first AIOps Agent
 Runtime. It is subordinate to `docs/VISION.md`, `docs/PHILOSOPHY.md`,
 `docs/ARCHITECTURE.md`, `docs/STATE_MACHINE.md`, `docs/TOOL_SPEC.md`, and
 `AGENTS.md`.
 
-Phase 0 now contains only the approved local Mock Runtime. Phases 1–11 remain
-planned; no SSH, model, database, container, or real server capability is
-enabled by the Phase 0 implementation.
+Phases 0–1 contain only the approved local Mock Runtime and its fail-closed
+lifecycle. Phases 2–11 remain planned; no SSH, model, database, container, or
+real server capability is enabled by the current implementation.
 
 ## Fixed architecture decisions
 
@@ -106,6 +106,8 @@ Real approval behavior, persistence, LLMs, SSH, Docker, arbitrary Shell,
 server mutation, Web UI, multi-user, multi-agent, and cloud features.
 
 ## Phase 1 — Runtime
+
+Status: Complete (2026-07-25)
 
 ### Goal
 

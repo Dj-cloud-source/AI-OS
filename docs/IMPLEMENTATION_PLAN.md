@@ -1,6 +1,6 @@
 # AIOps Agent Runtime Implementation Plan
 
-Status: Phase 0 implemented; Phases 1–11 planned
+Status: Phases 0–1 implemented; Phases 2–11 planned
 
 ## 1. Authority and scope
 
@@ -14,8 +14,8 @@ This plan is subordinate to the following governing documents:
 6. `AGENTS.md`
 
 Implementation proceeds phase by phase. A later phase must not be used to
-justify bypassing an earlier safety gate. Phase 0 implements only the local
-Mock Runtime defined below; it adds no real server capability.
+justify bypassing an earlier safety gate. Phases 0–1 implement only the local
+Mock Runtime and its fail-closed lifecycle; they add no real server capability.
 
 The decisions below are explicit resolutions confirmed for planning purposes;
 they do not assert that differently worded source documents were already
@@ -340,6 +340,8 @@ changes, deletion, Web UI, multi-user, multi-agent Runtime behavior, remote
 agents, and cloud services.
 
 ## Phase 1 — Runtime
+
+Status: Complete (2026-07-25)
 
 ### Goal
 

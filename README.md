@@ -3,8 +3,8 @@
 A local-first, policy-controlled Runtime for safe and testable server
 operations.
 
-Phase 0 provides an installable Python foundation, a deterministic Mock Tool,
-and a minimal Runtime lifecycle without connecting to a real server.
+Phases 0–1 provide an installable Python foundation, a deterministic Mock Tool,
+and a fail-closed Runtime lifecycle without connecting to a real server.
 
 ## Current capabilities
 
@@ -14,10 +14,13 @@ and a minimal Runtime lifecycle without connecting to a real server.
 - Typed and immutable Runtime models
 - Deterministic L0 `get_system_status` Mock Tool
 - Explicit Planner, Policy, Executor, and Verifier boundaries
-- Structured execution audit events
+- Immutable structured outcomes and ordered lifecycle events
+- Approval pause and human rejection without pre-Phase-4 resume
+- Structured lifecycle and execution audit events
 
-Phase 0 contains no SSH, Shell, Docker, Kubernetes, database writes, LLM
-connections, configuration changes, or destructive operations.
+The current implementation contains no SSH, Shell, Docker, Kubernetes,
+database writes, LLM connections, configuration changes, or destructive
+operations.
 
 ## Local setup
 

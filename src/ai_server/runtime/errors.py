@@ -1,4 +1,4 @@
-"""Explicit domain exceptions for the Phase 0 Runtime."""
+"""Explicit domain exceptions for the Phase 1 Runtime."""
 
 from typing import ClassVar
 
@@ -10,7 +10,7 @@ class AiServerError(Exception):
 
 
 class InvalidTaskError(AiServerError):
-    """Raised when Runtime input is not a valid local Phase 0 Task."""
+    """Raised when Runtime input is not a valid local Task."""
 
     code: ClassVar[str] = "invalid_task"
 
@@ -21,8 +21,44 @@ class InvalidStateTransitionError(AiServerError):
     code: ClassVar[str] = "invalid_state_transition"
 
 
+class TerminalStateMutationError(InvalidStateTransitionError):
+    """Raised when a caller attempts to mutate a terminal Task."""
+
+    code: ClassVar[str] = "terminal_state_mutation"
+
+
+class ReservedStateTransitionError(InvalidStateTransitionError):
+    """Raised when a transition enters or leaves a state reserved for a later phase."""
+
+    code: ClassVar[str] = "reserved_state_transition"
+
+
+class ApprovalRequiredError(AiServerError):
+    """Signal that Policy requires approval before any execution may occur."""
+
+    code: ClassVar[str] = "approval_required"
+
+
+class ApprovalResumeUnavailableError(InvalidStateTransitionError):
+    """Raised when Phase 1 is asked to resume approval-paused work."""
+
+    code: ClassVar[str] = "approval_resume_unavailable"
+
+
+class InvalidClockError(AiServerError):
+    """Raised when the lifecycle clock fails or returns an invalid timestamp."""
+
+    code: ClassVar[str] = "invalid_clock"
+
+
+class InvalidRuntimeOutcomeError(AiServerError):
+    """Raised when a supplied RuntimeOutcome fails strict boundary validation."""
+
+    code: ClassVar[str] = "invalid_runtime_outcome"
+
+
 class UnsupportedTaskError(AiServerError):
-    """Raised when the Phase 0 planner cannot handle a task request."""
+    """Raised when the planner cannot handle a task request."""
 
     code: ClassVar[str] = "unsupported_task"
 
@@ -53,10 +89,16 @@ class VerificationError(AiServerError):
 
 __all__ = [
     "AiServerError",
+    "ApprovalRequiredError",
+    "ApprovalResumeUnavailableError",
+    "InvalidClockError",
+    "InvalidRuntimeOutcomeError",
     "InvalidTaskError",
     "InvalidStateTransitionError",
     "PlanMismatchError",
     "PolicyDeniedError",
+    "ReservedStateTransitionError",
+    "TerminalStateMutationError",
     "ToolExecutionError",
     "UnsupportedTaskError",
     "VerificationError",

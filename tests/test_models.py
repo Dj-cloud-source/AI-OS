@@ -1,8 +1,10 @@
-from uuid import uuid4
+from typing import cast
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
 
+from ai_server.context.builder import ContextBuilder
 from ai_server.models.context import RuntimeContext
 from ai_server.models.execution import ExecutionPlan, ExecutionStep, StepRole
 from ai_server.models.system_status import (
@@ -12,6 +14,8 @@ from ai_server.models.system_status import (
 )
 from ai_server.models.task import Task
 from ai_server.models.tool import RiskLevel, ToolMetadata, ToolResult
+from ai_server.planner.service import Planner
+from ai_server.runtime.errors import InvalidTaskError, UnsupportedTaskError
 from ai_server.runtime.state import RuntimeState
 
 
@@ -39,6 +43,19 @@ def make_status() -> SystemStatus:
         memory_percent=34.0,
         disk_percent=45.5,
         services=(ServiceStatus(name="mock-api", state="running"),),
+    )
+
+
+def make_tool_metadata() -> ToolMetadata:
+    return ToolMetadata(
+        name="get_system_status",
+        version="1.0.0",
+        description="Mock status.",
+        risk_level=RiskLevel.L0,
+        timeout_seconds=1.0,
+        idempotent=True,
+        input_model="GetSystemStatusArguments",
+        output_model="SystemStatus",
     )
 
 
@@ -202,3 +219,76 @@ def test_valid_task_history_accepts_only_declared_edges() -> None:
     )
     task = Task(request="get_system_status", state=RuntimeState.COMPLETED, state_history=history)
     assert task.state_history == history
+
+
+def test_context_builder_rejects_untrusted_task_inputs_with_explicit_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "SENSITIVE_CONTEXT_TASK_MARKER"
+    task = Task(request="get_system_status")
+
+    def exploding_model_dump(*args: object, **kwargs: object) -> dict[str, object]:
+        del args, kwargs
+        raise RuntimeError(marker)
+
+    monkeypatch.setattr(Task, "model_dump", exploding_model_dump)
+
+    with pytest.raises(InvalidTaskError) as caught:
+        ContextBuilder().build(task)
+    with pytest.raises(InvalidTaskError):
+        ContextBuilder().build(cast(Task, object()))
+
+    assert marker not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
+def test_context_builder_rejects_uuid_subclass_without_propagating_it() -> None:
+    class UntrustedUUID(UUID):
+        pass
+
+    task = Task(request="get_system_status")
+    forged = task.model_copy(update={"task_id": UntrustedUUID(bytes=task.task_id.bytes)})
+
+    with pytest.raises(InvalidTaskError):
+        ContextBuilder().build(forged)
+
+
+def test_planner_wraps_untrusted_context_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "SENSITIVE_PLANNER_CONTEXT_MARKER"
+    task = Task(request="get_system_status")
+    context = ContextBuilder().build(task)
+
+    def exploding_model_dump(*args: object, **kwargs: object) -> dict[str, object]:
+        del args, kwargs
+        raise RuntimeError(marker)
+
+    monkeypatch.setattr(RuntimeContext, "model_dump", exploding_model_dump)
+
+    with pytest.raises(InvalidTaskError) as caught:
+        Planner().create_plan(context, make_tool_metadata())
+
+    assert marker not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
+def test_planner_wraps_untrusted_metadata_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "SENSITIVE_PLANNER_METADATA_MARKER"
+    task = Task(request="get_system_status")
+    context = ContextBuilder().build(task)
+    metadata = make_tool_metadata()
+
+    def exploding_model_dump(*args: object, **kwargs: object) -> dict[str, object]:
+        del args, kwargs
+        raise RuntimeError(marker)
+
+    monkeypatch.setattr(ToolMetadata, "model_dump", exploding_model_dump)
+
+    with pytest.raises(UnsupportedTaskError) as caught:
+        Planner().create_plan(context, metadata)
+
+    assert marker not in str(caught.value)
+    assert caught.value.__cause__ is None

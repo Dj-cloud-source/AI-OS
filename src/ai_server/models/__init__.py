@@ -2,6 +2,14 @@
 
 from ai_server.models.context import RuntimeContext
 from ai_server.models.execution import ExecutionPlan, ExecutionStep, StepRole
+from ai_server.models.runtime import (
+    LifecycleEvent,
+    LifecycleEventKind,
+    RuntimeComponent,
+    RuntimeFailure,
+    RuntimeOutcome,
+    RuntimeOutcomeStatus,
+)
 from ai_server.models.system_status import (
     GetSystemStatusArguments,
     ServiceStatus,
@@ -14,8 +22,14 @@ __all__ = [
     "ExecutionPlan",
     "ExecutionStep",
     "GetSystemStatusArguments",
+    "LifecycleEvent",
+    "LifecycleEventKind",
     "RiskLevel",
+    "RuntimeComponent",
     "RuntimeContext",
+    "RuntimeFailure",
+    "RuntimeOutcome",
+    "RuntimeOutcomeStatus",
     "ServiceStatus",
     "StepRole",
     "Task",

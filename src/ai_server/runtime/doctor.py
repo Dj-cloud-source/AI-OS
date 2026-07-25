@@ -3,12 +3,12 @@
 import sys
 from importlib import import_module
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
+from ai_server.models.runtime import RuntimeOutcomeStatus
 from ai_server.models.task import Task
 from ai_server.planner.service import SUPPORTED_REQUEST
 from ai_server.runtime.engine import create_mock_runtime
-from ai_server.runtime.errors import AiServerError
 from ai_server.runtime.state import RuntimeState
 
 _REQUIRED_MODULES = ("pydantic", "rich", "sqlalchemy", "typer")
@@ -53,12 +53,12 @@ def run_doctor() -> DoctorReport:
     for module_name in _REQUIRED_MODULES:
         try:
             import_module(module_name)
-        except ImportError:
+        except Exception as error:
             checks.append(
                 DoctorCheck(
                     name=f"import:{module_name}",
                     passed=False,
-                    detail="missing",
+                    detail="missing" if isinstance(error, ImportError) else "import_failed",
                 )
             )
         else:
@@ -71,20 +71,24 @@ def run_doctor() -> DoctorReport:
             )
 
     try:
-        completed = create_mock_runtime().run(Task(request=SUPPORTED_REQUEST))
-    except (AiServerError, ValidationError) as error:
+        outcome = create_mock_runtime().run(Task(request=SUPPORTED_REQUEST))
+    except Exception as error:
+        del error
         checks.append(
             DoctorCheck(
                 name="mock-runtime",
                 passed=False,
-                detail=type(error).__name__,
+                detail="runtime_failed",
             )
         )
     else:
         checks.append(
             DoctorCheck(
                 name="mock-runtime",
-                passed=completed.state is RuntimeState.COMPLETED,
+                passed=(
+                    outcome.status is RuntimeOutcomeStatus.COMPLETED
+                    and outcome.task.state is RuntimeState.COMPLETED
+                ),
                 detail="simulated L0 lifecycle completed",
             )
         )

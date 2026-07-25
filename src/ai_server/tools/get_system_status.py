@@ -6,6 +6,7 @@ from ai_server.models.system_status import (
     SystemStatus,
 )
 from ai_server.models.tool import RiskLevel, ToolMetadata, ToolResult
+from ai_server.runtime.errors import ToolExecutionError
 
 GET_SYSTEM_STATUS_METADATA = ToolMetadata(
     name="get_system_status",
@@ -21,20 +22,29 @@ GET_SYSTEM_STATUS_METADATA = ToolMetadata(
 
 def get_system_status(arguments: GetSystemStatusArguments) -> ToolResult[SystemStatus]:
     """Return deterministic mock data without inspecting the local machine."""
-    status = SystemStatus(
-        target=arguments.target,
-        cpu_percent=12.5,
-        memory_percent=34.0,
-        disk_percent=45.5,
-        services=(ServiceStatus(name="mock-api", state="running"),),
-    )
-    return ToolResult[SystemStatus](
-        tool_name=GET_SYSTEM_STATUS_METADATA.name,
-        tool_version=GET_SYSTEM_STATUS_METADATA.version,
-        success=True,
-        data=status,
-        duration_ms=0,
-    )
+    try:
+        if type(arguments) is not GetSystemStatusArguments:
+            raise TypeError
+        arguments = GetSystemStatusArguments.model_validate(
+            arguments.model_dump(mode="python", warnings="none"),
+            strict=True,
+        )
+        status = SystemStatus(
+            target=arguments.target,
+            cpu_percent=12.5,
+            memory_percent=34.0,
+            disk_percent=45.5,
+            services=(ServiceStatus(name="mock-api", state="running"),),
+        )
+        return ToolResult[SystemStatus](
+            tool_name=GET_SYSTEM_STATUS_METADATA.name,
+            tool_version=GET_SYSTEM_STATUS_METADATA.version,
+            success=True,
+            data=status,
+            duration_ms=0,
+        )
+    except Exception:
+        raise ToolExecutionError("Mock Tool rejected malformed arguments") from None
 
 
 __all__ = [

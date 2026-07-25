@@ -11,7 +11,8 @@ from typer.testing import CliRunner
 
 from ai_server import __version__
 from ai_server.cli.app import app
-from ai_server.runtime.doctor import DoctorCheck, DoctorReport
+from ai_server.models.task import Task
+from ai_server.runtime.doctor import DoctorCheck, DoctorReport, run_doctor
 
 runner = CliRunner()
 
@@ -86,3 +87,83 @@ def test_doctor_command_returns_nonzero_for_failed_report(
     assert result.exit_code == 1
     assert "FAIL" in result.stdout
     assert result.exception is not None
+
+
+def test_doctor_redacts_unexpected_import_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "SENSITIVE_DOCTOR_IMPORT_MARKER"
+    doctor_module = import_module("ai_server.runtime.doctor")
+
+    def exploding_import(module_name: str) -> None:
+        del module_name
+        raise RuntimeError(marker)
+
+    monkeypatch.setattr(doctor_module, "import_module", exploding_import)
+
+    report = run_doctor()
+    import_checks = [check for check in report.checks if check.name.startswith("import:")]
+
+    assert import_checks
+    assert all(not check.passed and check.detail == "import_failed" for check in import_checks)
+    assert marker not in report.model_dump_json()
+
+
+def test_doctor_redacts_unexpected_runtime_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "SENSITIVE_DOCTOR_RUNTIME_MARKER"
+    doctor_module = import_module("ai_server.runtime.doctor")
+
+    class ExplodingRuntime:
+        def run(self, task: Task) -> None:
+            del task
+            raise RuntimeError(marker)
+
+    monkeypatch.setattr(doctor_module, "create_mock_runtime", ExplodingRuntime)
+
+    report = run_doctor()
+    runtime_check = next(check for check in report.checks if check.name == "mock-runtime")
+
+    assert not runtime_check.passed
+    assert runtime_check.detail == "runtime_failed"
+    assert marker not in report.model_dump_json()
+
+
+def test_doctor_does_not_reflect_untrusted_exception_class_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "SENSITIVE_EXCEPTION_CLASS_MARKER"
+    doctor_module = import_module("ai_server.runtime.doctor")
+
+    class ExplodingName(type):
+        def __getattribute__(cls, name: str) -> object:
+            if name == "__name__":
+                raise RuntimeError(marker)
+            return super().__getattribute__(name)
+
+    class UntrustedError(Exception, metaclass=ExplodingName):
+        pass
+
+    def exploding_import(module_name: str) -> None:
+        del module_name
+        raise UntrustedError(marker)
+
+    class ExplodingRuntime:
+        def run(self, task: Task) -> None:
+            del task
+            raise UntrustedError(marker)
+
+    monkeypatch.setattr(doctor_module, "import_module", exploding_import)
+    monkeypatch.setattr(doctor_module, "create_mock_runtime", ExplodingRuntime)
+
+    report = run_doctor()
+
+    assert all(
+        check.detail == "import_failed"
+        for check in report.checks
+        if check.name.startswith("import:")
+    )
+    runtime_check = next(check for check in report.checks if check.name == "mock-runtime")
+    assert runtime_check.detail == "runtime_failed"
+    assert marker not in report.model_dump_json()
