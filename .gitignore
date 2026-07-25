@@ -10,3 +10,5 @@ build/
 dist/
 *.egg-info/
 
+.obsidian/
+欢迎.md

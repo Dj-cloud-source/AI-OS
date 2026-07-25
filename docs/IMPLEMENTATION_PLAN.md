@@ -6,12 +6,12 @@ Status: Phase 0 implemented; Phases 1–11 planned
 
 This plan is subordinate to the following governing documents:
 
-1. `VISION.md.md`
-2. `PHILOSOPHY.md.md`
-3. `ARCHITECTURE.md.md`
-4. `STATE_MACHINE.md.md`
-5. `TOOL_SPEC.md.md`
-6. `AGENTS.md.md`
+1. `VISION.md`
+2. `PHILOSOPHY.md`
+3. `ARCHITECTURE.md`
+4. `STATE_MACHINE.md`
+5. `TOOL_SPEC.md`
+6. `AGENTS.md`
 
 Implementation proceeds phase by phase. A later phase must not be used to
 justify bypassing an earlier safety gate. Phase 0 implements only the local
@@ -960,7 +960,7 @@ with fresh independent evidence.
 - Post-operation service-status and start-identity reads dispatched through
   Executor.
 - A documented manual-intervention failure path.
-- A pre-implementation reconciliation gate for `TOOL_SPEC.md.md`: its current
+- A pre-implementation reconciliation gate for `TOOL_SPEC.md`: its current
   `Idempotent: true` and `Restart previous service state` statements conflict
   with the confirmed non-idempotent, no-automatic-rollback design. The
   governing spec must be updated or re-confirmed before Phase 10 code begins.

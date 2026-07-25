@@ -1,4 +1,4 @@
-# AGENT.md
+# AGENTS.md
 
 > Development Rules for AIOps Agent Runtime
 
