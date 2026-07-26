@@ -38,6 +38,7 @@ class LifecycleEventKind(StrEnum):
 
     STATE_ENTERED = "STATE_ENTERED"
     COMPONENT_COMPLETED = "COMPONENT_COMPLETED"
+    APPROVAL_DECISION_RECORDED = "APPROVAL_DECISION_RECORDED"
     PAUSED = "PAUSED"
     REJECTED = "REJECTED"
     FAILED = "FAILED"
@@ -95,6 +96,12 @@ class LifecycleEvent(BaseModel):
             self._validate_state_entry()
         elif self.kind is LifecycleEventKind.COMPONENT_COMPLETED:
             self._validate_component_completion()
+        elif self.kind is LifecycleEventKind.APPROVAL_DECISION_RECORDED:
+            self._validate_control_event(
+                state=RuntimeState.WAITING_FOR_APPROVAL,
+                component=None,
+                reason_code="not_required",
+            )
         elif self.kind is LifecycleEventKind.PAUSED:
             self._validate_control_event(
                 state=RuntimeState.WAITING_FOR_APPROVAL,
@@ -204,6 +211,7 @@ class RuntimeOutcome(BaseModel):
         current_state: RuntimeState | None = None
         completed_components: set[RuntimeComponent] = set()
         previous_timestamp: datetime | None = None
+        not_required_count = 0
         pause_count = 0
         terminal_control_event_count = 0
         for event in self.events:
@@ -229,6 +237,8 @@ class RuntimeOutcome(BaseModel):
                     raise ValueError("a Runtime component cannot complete more than once")
                 if event.component is not None:
                     completed_components.add(event.component)
+            elif event.kind is LifecycleEventKind.APPROVAL_DECISION_RECORDED:
+                not_required_count += 1
             elif event.kind is LifecycleEventKind.PAUSED:
                 pause_count += 1
             elif event.kind in {LifecycleEventKind.REJECTED, LifecycleEventKind.FAILED}:
@@ -237,9 +247,10 @@ class RuntimeOutcome(BaseModel):
                     raise ValueError("rejection or failure must be the final event")
 
         waiting_visited = RuntimeState.WAITING_FOR_APPROVAL in self.task.state_history
-        if pause_count != int(waiting_visited):
+        approval_gate_evidence_count = not_required_count + pause_count
+        if approval_gate_evidence_count != int(waiting_visited):
             raise ValueError(
-                "WAITING_FOR_APPROVAL lifecycle must contain exactly one approval pause"
+                "WAITING_FOR_APPROVAL lifecycle must contain exactly one approval decision"
             )
         if terminal_control_event_count > 1:
             raise ValueError("a Runtime outcome can contain only one terminal control event")

@@ -181,7 +181,7 @@ def make_runtime(
 
 def test_runtime_completes_with_exact_state_and_event_history() -> None:
     base = datetime(2026, 7, 25, 8, 0, tzinfo=UTC)
-    timestamps = [base + timedelta(seconds=index) for index in range(12)]
+    timestamps = [base + timedelta(seconds=index) for index in range(14)]
     trace = Trace()
 
     outcome = make_runtime(trace, clock=SequenceClock(timestamps)).run(
@@ -195,6 +195,7 @@ def test_runtime_completes_with_exact_state_and_event_history() -> None:
         RuntimeState.CONTEXT_BUILDING,
         RuntimeState.PLANNING,
         RuntimeState.POLICY_CHECK,
+        RuntimeState.WAITING_FOR_APPROVAL,
         RuntimeState.EXECUTING,
         RuntimeState.VERIFYING,
         RuntimeState.COMPLETED,
@@ -227,6 +228,12 @@ def test_runtime_completes_with_exact_state_and_event_history() -> None:
             RuntimeState.POLICY_CHECK,
             RuntimeComponent.POLICY,
         ),
+        (LifecycleEventKind.STATE_ENTERED, RuntimeState.WAITING_FOR_APPROVAL, None),
+        (
+            LifecycleEventKind.APPROVAL_DECISION_RECORDED,
+            RuntimeState.WAITING_FOR_APPROVAL,
+            None,
+        ),
         (LifecycleEventKind.STATE_ENTERED, RuntimeState.EXECUTING, None),
         (
             LifecycleEventKind.COMPONENT_COMPLETED,
@@ -241,7 +248,9 @@ def test_runtime_completes_with_exact_state_and_event_history() -> None:
         ),
         (LifecycleEventKind.STATE_ENTERED, RuntimeState.COMPLETED, None),
     ]
-    assert [event.sequence for event in outcome.events] == list(range(12))
+    assert outcome.events[8].reason_code == "not_required"
+    assert not any(event.kind is LifecycleEventKind.PAUSED for event in outcome.events)
+    assert [event.sequence for event in outcome.events] == list(range(14))
     assert [event.occurred_at for event in outcome.events] == timestamps
     assert len(outcome.results) == 1
 
@@ -299,6 +308,7 @@ def test_runtime_completes_with_exact_state_and_event_history() -> None:
                 RuntimeState.CONTEXT_BUILDING,
                 RuntimeState.PLANNING,
                 RuntimeState.POLICY_CHECK,
+                RuntimeState.WAITING_FOR_APPROVAL,
                 RuntimeState.EXECUTING,
                 RuntimeState.FAILED,
             ),
@@ -314,6 +324,7 @@ def test_runtime_completes_with_exact_state_and_event_history() -> None:
                 RuntimeState.CONTEXT_BUILDING,
                 RuntimeState.PLANNING,
                 RuntimeState.POLICY_CHECK,
+                RuntimeState.WAITING_FOR_APPROVAL,
                 RuntimeState.EXECUTING,
                 RuntimeState.VERIFYING,
                 RuntimeState.FAILED,
@@ -520,6 +531,9 @@ def test_approval_required_pauses_without_execution(risk_label: str) -> None:
     assert outcome.failure is None
     assert outcome.events[-1].kind is LifecycleEventKind.PAUSED
     assert outcome.events[-1].reason_code == "approval_required"
+    assert not any(
+        event.kind is LifecycleEventKind.APPROVAL_DECISION_RECORDED for event in outcome.events
+    )
 
     with pytest.raises(ApprovalResumeUnavailableError):
         runtime.run(outcome.task)
@@ -967,7 +981,7 @@ def test_clock_datetime_hooks_cannot_raise_baseexception_after_tool() -> None:
 
     outcome = make_runtime(
         trace,
-        clock=SequenceClock([*clock_values(8), untrusted_timestamp]),
+        clock=SequenceClock([*clock_values(10), untrusted_timestamp]),
     ).run(Task(request=SUPPORTED_REQUEST))
 
     assert outcome.status is RuntimeOutcomeStatus.FAILED
@@ -1028,7 +1042,7 @@ def test_clock_timestamp_is_normalized_before_event_validation_and_logging(
     marker = "SENSITIVE_TZ_MARKER"
     stateful_timezone = StatefulTimezone(valid_reads=1, marker=marker)
     first = datetime(2026, 7, 25, 8, 0, tzinfo=stateful_timezone)
-    remaining = clock_values(11)
+    remaining = clock_values(13)
     caplog.set_level(logging.INFO)
 
     outcome = RuntimeEngine(clock=SequenceClock([first, *remaining])).run(
@@ -1045,9 +1059,9 @@ def test_stateful_timezone_failure_after_tool_returns_safe_failed_outcome(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     marker = "SENSITIVE_LATE_TZ_MARKER"
-    stateful_timezone = StatefulTimezone(valid_reads=8, marker=marker)
+    stateful_timezone = StatefulTimezone(valid_reads=10, marker=marker)
     timestamps = [
-        datetime(2026, 7, 25, 8, 0, index, tzinfo=stateful_timezone) for index in range(12)
+        datetime(2026, 7, 25, 8, 0, index, tzinfo=stateful_timezone) for index in range(14)
     ]
     trace = Trace()
     caplog.set_level(logging.INFO)
@@ -1073,20 +1087,23 @@ def test_stateful_timezone_failure_after_tool_returns_safe_failed_outcome(
         (2, ["context"], RuntimeState.CONTEXT_BUILDING, 0),
         (4, ["context", "planner"], RuntimeState.PLANNING, 0),
         (6, ["context", "planner", "policy"], RuntimeState.POLICY_CHECK, 0),
+        (7, ["context", "planner", "policy"], RuntimeState.POLICY_CHECK, 0),
+        (8, ["context", "planner", "policy"], RuntimeState.WAITING_FOR_APPROVAL, 0),
+        (9, ["context", "planner", "policy"], RuntimeState.WAITING_FOR_APPROVAL, 0),
         (
-            8,
+            10,
             ["context", "planner", "policy", "executor", "tool"],
             RuntimeState.EXECUTING,
             1,
         ),
         (
-            10,
+            12,
             ["context", "planner", "policy", "executor", "tool", "verifier"],
             RuntimeState.VERIFYING,
             1,
         ),
         (
-            11,
+            13,
             ["context", "planner", "policy", "executor", "tool", "verifier"],
             RuntimeState.VERIFYING,
             1,
@@ -1115,6 +1132,14 @@ def test_late_clock_failure_returns_structured_failed_outcome(
     assert outcome.events[-1].reason_code == "invalid_clock"
     assert len(outcome.results) == result_count
     assert trace.calls == expected_calls
+    if failed_from is RuntimeState.WAITING_FOR_APPROVAL:
+        assert (
+            sum(
+                event.kind is LifecycleEventKind.APPROVAL_DECISION_RECORDED
+                for event in outcome.events
+            )
+            == 1
+        )
     assert RuntimeOutcome.model_validate_json(outcome.model_dump_json()) == outcome
 
 
@@ -1254,7 +1279,7 @@ def test_runtime_emits_structured_transition_and_execution_audit_logs(
     ]
     audits = [message for message in messages if message["event"] == "execution_audit"]
 
-    assert len(transitions) == 6
+    assert len(transitions) == 7
     assert all(message["task_id"] == str(outcome.task.task_id) for message in transitions)
     assert transitions[-1]["to_state"] == "COMPLETED"
     assert audits == [

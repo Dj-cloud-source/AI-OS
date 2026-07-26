@@ -33,8 +33,8 @@ EXPECTED_EDGES = {
     (RuntimeState.PLANNING, RuntimeState.POLICY_CHECK),
     (RuntimeState.PLANNING, RuntimeState.FAILED),
     (RuntimeState.POLICY_CHECK, RuntimeState.WAITING_FOR_APPROVAL),
-    (RuntimeState.POLICY_CHECK, RuntimeState.EXECUTING),
     (RuntimeState.POLICY_CHECK, RuntimeState.FAILED),
+    (RuntimeState.WAITING_FOR_APPROVAL, RuntimeState.EXECUTING),
     (RuntimeState.WAITING_FOR_APPROVAL, RuntimeState.FAILED),
     (RuntimeState.EXECUTING, RuntimeState.VERIFYING),
     (RuntimeState.EXECUTING, RuntimeState.FAILED),
@@ -78,12 +78,17 @@ def test_phase_one_transition_matrix(
             RuntimeStateMachine.transition(current, target)
 
 
-def test_waiting_cannot_resume_and_reserved_states_have_no_edges() -> None:
+def test_waiting_is_the_only_execution_gate_and_reserved_states_have_no_edges() -> None:
     assert RuntimeStateMachine.allowed_targets(RuntimeState.WAITING_FOR_APPROVAL) == {
-        RuntimeState.FAILED
+        RuntimeState.EXECUTING,
+        RuntimeState.FAILED,
     }
-    assert not RuntimeStateMachine.can_transition(
+    assert RuntimeStateMachine.can_transition(
         RuntimeState.WAITING_FOR_APPROVAL,
+        RuntimeState.EXECUTING,
+    )
+    assert not RuntimeStateMachine.can_transition(
+        RuntimeState.POLICY_CHECK,
         RuntimeState.EXECUTING,
     )
     for state in RESERVED_STATES:

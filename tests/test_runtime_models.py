@@ -139,6 +139,10 @@ def test_runtime_outcome_rejects_contradictory_lifecycle_data(
         payload["task"]["state_history"] = [
             RuntimeState.RECEIVED,
             RuntimeState.CONTEXT_BUILDING,
+            RuntimeState.PLANNING,
+            RuntimeState.POLICY_CHECK,
+            RuntimeState.WAITING_FOR_APPROVAL,
+            RuntimeState.EXECUTING,
             RuntimeState.FAILED,
         ]
         payload["task"]["state"] = RuntimeState.FAILED
@@ -173,6 +177,22 @@ def test_event_shapes_reject_contradictory_fields() -> None:
             "kind": LifecycleEventKind.COMPONENT_COMPLETED,
             "state": RuntimeState.PLANNING,
             "component": RuntimeComponent.EXECUTOR,
+        },
+        {
+            "task_id": task.task_id,
+            "sequence": 0,
+            "occurred_at": timestamp,
+            "kind": LifecycleEventKind.APPROVAL_DECISION_RECORDED,
+            "state": RuntimeState.EXECUTING,
+            "reason_code": "not_required",
+        },
+        {
+            "task_id": task.task_id,
+            "sequence": 0,
+            "occurred_at": timestamp,
+            "kind": LifecycleEventKind.APPROVAL_DECISION_RECORDED,
+            "state": RuntimeState.WAITING_FOR_APPROVAL,
+            "reason_code": "approval_required",
         },
         {
             "task_id": task.task_id,
@@ -234,6 +254,38 @@ def test_plan_and_results_require_completed_producer_stages() -> None:
         RuntimeOutcome.model_validate(premature_result)
 
 
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "paused_too"])
+def test_automatic_approval_gate_requires_one_not_required_decision(
+    mutation: str,
+) -> None:
+    completed = completed_outcome()
+    payload = completed.model_dump(mode="python")
+    payload["events"] = list(payload["events"])
+    decision_index = next(
+        index
+        for index, event in enumerate(payload["events"])
+        if event["kind"] is LifecycleEventKind.APPROVAL_DECISION_RECORDED
+    )
+
+    if mutation == "missing":
+        del payload["events"][decision_index]
+    else:
+        extra = payload["events"][decision_index].copy()
+        if mutation == "paused_too":
+            extra.update(
+                {
+                    "kind": LifecycleEventKind.PAUSED,
+                    "reason_code": "approval_required",
+                }
+            )
+        payload["events"].insert(decision_index + 1, extra)
+    for sequence, event in enumerate(payload["events"]):
+        event["sequence"] = sequence
+
+    with pytest.raises(ValidationError, match="exactly one approval decision"):
+        RuntimeOutcome.model_validate(payload)
+
+
 def test_waiting_history_requires_pause_and_defined_terminal_reason() -> None:
     waiting = waiting_outcome()
     without_pause = waiting.model_dump(mode="python")
@@ -243,7 +295,7 @@ def test_waiting_history_requires_pause_and_defined_terminal_reason() -> None:
     for sequence, event in enumerate(without_pause["events"]):
         event["sequence"] = sequence
 
-    with pytest.raises(ValidationError, match="approval pause"):
+    with pytest.raises(ValidationError, match="approval decision"):
         RuntimeOutcome.model_validate(without_pause)
 
     rejected = RuntimeEngine().reject(waiting)
@@ -273,6 +325,7 @@ def test_runtime_outcome_public_enums_are_exact_and_stable() -> None:
     assert tuple(LifecycleEventKind) == (
         LifecycleEventKind.STATE_ENTERED,
         LifecycleEventKind.COMPONENT_COMPLETED,
+        LifecycleEventKind.APPROVAL_DECISION_RECORDED,
         LifecycleEventKind.PAUSED,
         LifecycleEventKind.REJECTED,
         LifecycleEventKind.FAILED,

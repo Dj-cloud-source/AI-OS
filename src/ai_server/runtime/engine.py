@@ -406,38 +406,50 @@ class RuntimeEngine:
                 recorder=recorder,
                 plan=plan,
             )
+        approval_required = False
         try:
             policy_check = cast(Callable[..., object], self._policy.check)
             policy_result = policy_check(plan, self._catalog)
             if policy_result is not None:
                 raise PolicyDeniedError("Policy returned an invalid decision signal")
         except ApprovalRequiredError:
-            if not recorder.record(
+            approval_required = True
+        except Exception as error:
+            return self._failure_outcome(
+                task=task,
+                recorder=recorder,
+                component=RuntimeComponent.POLICY,
+                error=error,
+                plan=plan,
+            )
+        if not recorder.record(
+            kind=LifecycleEventKind.COMPONENT_COMPLETED,
+            state=task.state,
+            component=RuntimeComponent.POLICY,
+        ):
+            recorder.record_with_last_timestamp(
                 kind=LifecycleEventKind.COMPONENT_COMPLETED,
                 state=task.state,
                 component=RuntimeComponent.POLICY,
-            ):
-                recorder.record_with_last_timestamp(
-                    kind=LifecycleEventKind.COMPONENT_COMPLETED,
-                    state=task.state,
-                    component=RuntimeComponent.POLICY,
-                )
-                return self._clock_failure_outcome(
-                    task=task,
-                    recorder=recorder,
-                    plan=plan,
-                )
-            task, transition_recorded = self._transition(
-                task,
-                RuntimeState.WAITING_FOR_APPROVAL,
-                recorder,
             )
-            if not transition_recorded:
-                return self._clock_failure_outcome(
-                    task=task,
-                    recorder=recorder,
-                    plan=plan,
-                )
+            return self._clock_failure_outcome(
+                task=task,
+                recorder=recorder,
+                plan=plan,
+            )
+
+        task, transition_recorded = self._transition(
+            task,
+            RuntimeState.WAITING_FOR_APPROVAL,
+            recorder,
+        )
+        if not transition_recorded:
+            return self._clock_failure_outcome(
+                task=task,
+                recorder=recorder,
+                plan=plan,
+            )
+        if approval_required:
             if not recorder.record(
                 kind=LifecycleEventKind.PAUSED,
                 state=task.state,
@@ -459,23 +471,15 @@ class RuntimeEngine:
                 plan=plan,
                 events=recorder.events,
             )
-        except Exception as error:
-            return self._failure_outcome(
-                task=task,
-                recorder=recorder,
-                component=RuntimeComponent.POLICY,
-                error=error,
-                plan=plan,
-            )
         if not recorder.record(
-            kind=LifecycleEventKind.COMPONENT_COMPLETED,
+            kind=LifecycleEventKind.APPROVAL_DECISION_RECORDED,
             state=task.state,
-            component=RuntimeComponent.POLICY,
+            reason_code="not_required",
         ):
             recorder.record_with_last_timestamp(
-                kind=LifecycleEventKind.COMPONENT_COMPLETED,
+                kind=LifecycleEventKind.APPROVAL_DECISION_RECORDED,
                 state=task.state,
-                component=RuntimeComponent.POLICY,
+                reason_code="not_required",
             )
             return self._clock_failure_outcome(
                 task=task,

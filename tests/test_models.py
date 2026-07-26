@@ -213,12 +213,30 @@ def test_valid_task_history_accepts_only_declared_edges() -> None:
         RuntimeState.CONTEXT_BUILDING,
         RuntimeState.PLANNING,
         RuntimeState.POLICY_CHECK,
+        RuntimeState.WAITING_FOR_APPROVAL,
         RuntimeState.EXECUTING,
         RuntimeState.VERIFYING,
         RuntimeState.COMPLETED,
     )
     task = Task(request="get_system_status", state=RuntimeState.COMPLETED, state_history=history)
     assert task.state_history == history
+
+
+def test_task_history_rejects_policy_to_execution_bypass() -> None:
+    history = (
+        RuntimeState.RECEIVED,
+        RuntimeState.CONTEXT_BUILDING,
+        RuntimeState.PLANNING,
+        RuntimeState.POLICY_CHECK,
+        RuntimeState.EXECUTING,
+    )
+
+    with pytest.raises(ValidationError):
+        Task(
+            request="get_system_status",
+            state=RuntimeState.EXECUTING,
+            state_history=history,
+        )
 
 
 def test_context_builder_rejects_untrusted_task_inputs_with_explicit_error(

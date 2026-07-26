@@ -33,11 +33,10 @@ _ALLOWED_TRANSITIONS: dict[RuntimeState, frozenset[RuntimeState]] = {
     RuntimeState.POLICY_CHECK: frozenset(
         {
             RuntimeState.WAITING_FOR_APPROVAL,
-            RuntimeState.EXECUTING,
             RuntimeState.FAILED,
         }
     ),
-    RuntimeState.WAITING_FOR_APPROVAL: frozenset({RuntimeState.FAILED}),
+    RuntimeState.WAITING_FOR_APPROVAL: frozenset({RuntimeState.EXECUTING, RuntimeState.FAILED}),
     RuntimeState.EXECUTING: frozenset({RuntimeState.VERIFYING, RuntimeState.FAILED}),
     RuntimeState.VERIFYING: frozenset({RuntimeState.COMPLETED, RuntimeState.FAILED}),
 }
