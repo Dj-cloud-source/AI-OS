@@ -1,5 +1,3 @@
-# PHILOSOPHY.md
-
 # The Philosophy of AIOps Agent Runtime
 
 Version: 1.0
@@ -111,6 +109,11 @@ Every dangerous operation deserves another chance to be reviewed.
 The AI may generate a plan.
 
 Only humans can approve the plan.
+
+Policy may determine that human approval is `NOT_REQUIRED` for an allowed
+low-risk Plan. `NOT_REQUIRED` is an audited Policy result, not an approval.
+Whenever Policy requires Approval/Commit, only an authorized human can produce
+`APPROVED`.
 
 Approval is not trust.
 
@@ -238,6 +241,35 @@ Changing anything invalidates approval.
 
 ---
 
+# Risk Approval Semantics
+
+L2 requires explicit human Approval / Commit.
+
+L3 requires explicit human Approval / Commit,
+
+plus an immediate, single-use Manual Confirmation before each L3 Tool
+invocation.
+
+For both L2 and L3,
+
+approval is bound to the exact plan,
+
+arguments,
+
+steps,
+
+and expiration time.
+
+Changing any bound content invalidates approval.
+
+Risk classification is a minimum safety requirement.
+
+It never grants permission by itself,
+
+and Policy may still reject the operation.
+
+---
+
 # Memory Is Experience
 
 Memory is not conversation history.
@@ -254,7 +286,9 @@ How was it solved?
 
 What should be done next time?
 
-Repeated success becomes reusable knowledge.
+Qualified, sanitized evidence may become reusable knowledge.
+
+Repetition or success alone is never enough to activate a Skill.
 
 ---
 
@@ -270,11 +304,11 @@ Incident
 
 ↓
 
-Candidate Skill
+`CANDIDATE`
 
 ↓
 
-Testing
+Validation and Testing
 
 ↓
 
@@ -282,11 +316,18 @@ Human Review
 
 ↓
 
-Approved Skill
+`APPROVED`
 
 ↓
 
-Production
+Explicit Human Activation
+
+↓
+
+`ACTIVE`
+
+Only `ACTIVE` Skills may participate in default Runtime retrieval. Skill Review
+and activation never authorize a production Tool call.
 
 ---
 
@@ -342,13 +383,31 @@ Better Context
 
 Better Skills
 
-Better Policies
+Better Policies through a separate human-governed process
 
 Better Verification
 
 Not by silently changing its own behavior.
 
 Self-improvement must remain observable.
+
+"Better Policies" is not part of Skill Evolution.
+
+Policy changes require an independent,
+
+explicitly reviewed human governance process.
+
+Evolution and models may identify a policy concern,
+
+but they must never modify,
+
+approve,
+
+activate,
+
+weaken,
+
+or bypass Policy.
 
 ---
 

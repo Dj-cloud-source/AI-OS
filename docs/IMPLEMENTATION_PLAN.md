@@ -1,6 +1,7 @@
 # AIOps Agent Runtime Implementation Plan
 
-Status: Phases 0–1 implemented; Phases 2–11 planned
+Status: Phases 0–1 baselines implemented; approval-gate conformance remediation
+and Phases 2–11 planned
 
 ## 1. Authority and scope
 
@@ -17,9 +18,9 @@ Implementation proceeds phase by phase. A later phase must not be used to
 justify bypassing an earlier safety gate. Phases 0–1 implement only the local
 Mock Runtime and its fail-closed lifecycle; they add no real server capability.
 
-The decisions below are explicit resolutions confirmed for planning purposes;
-they do not assert that differently worded source documents were already
-consistent. The governing documents remain unchanged in this batch.
+The decisions below are subordinate implementation guidance. When this plan
+and a governing document differ, implementation stops and the governing
+document wins; this plan must then be corrected before work resumes.
 
 ## 2. Fixed decisions
 
@@ -69,7 +70,7 @@ The authoritative execution data flow is:
 ```text
 Runtime
   -> Policy
-  -> Approval (when required)
+  -> Approval Decision (Policy determines whether Human Approval is required)
   -> Executor
   -> Tool Gateway
   -> Tool
@@ -90,16 +91,19 @@ Phase 0–7 Context Builder accepts only Task data, static local configuration,
 Memory facts when available, and evidence already supplied by Runtime. It does
 not decide which remote Tools to run.
 
-Before Phase 8 enables remote context, Runtime adds an `ObservationRequest`
-contract. Runtime creates these requests deterministically from a versioned,
-local context profile and an allowlisted `target_id`; neither Planner nor the
-model supplies host, user, port, command, or flags. Every request passes through
-the same Policy contract by being normalized into a system-generated
-ExecutionPlan containing only `OBSERVE` steps. Planner is not involved. Policy
-resolves each read Tool's risk from Metadata, and Executor obtains typed,
-read-only results that Runtime hands to Context Builder. The top-level
-`POLICY_CHECK` state continues to refer to the main ExecutionPlan; observation
-policy and execution checks are recorded as nested lifecycle events during
+Before Phase 8 enables remote context, Runtime adds versioned Context Profile,
+Context Profile Registry Record, and `ObservationRequest` contracts. Runtime
+uses only Task fields, trusted target configuration, and sanitized Memory to
+build `BootstrapContext`; a Context Skill can suggest only an exact registered
+Profile ID, Version, and Hash. Neither Planner nor the model supplies host,
+user, port, command, flags, or free arguments.
+
+Runtime converts the validated Profile into a linked `OBSERVATION` Task. The
+child follows the complete Runtime lifecycle and its read-only Plan passes
+through Policy, Approval Decision, Executor, Tool Gateway, and Verifier. The
+parent remains in `CONTEXT_BUILDING` and consumes only a finalized structured
+child result. Observation Tasks cannot recursively create Observation Tasks;
+there are no nested lifecycle events that secretly execute a Tool inside
 `CONTEXT_BUILDING`.
 
 Verification reads are `ExecutionStep` entries with role `VERIFY`. Their Tool
@@ -137,33 +141,33 @@ RECEIVED
   -> CONTEXT_BUILDING
   -> PLANNING
   -> POLICY_CHECK
+  -> WAITING_FOR_APPROVAL
   -> EXECUTING
   -> VERIFYING
   -> COMPLETED
 ```
 
-The approval branch is:
-
-```text
-POLICY_CHECK
-  -> WAITING_FOR_APPROVAL
-  -> EXECUTING
-```
+For L0, `WAITING_FOR_APPROVAL` records the Policy-produced `NOT_REQUIRED`
+decision and exits immediately without human input. When Policy requires Human
+Execution Approval, the same state pauses until a valid exact-plan decision is
+available.
 
 Phase 0 defines all enum values but does not invent behavior for reserved
-exceptional states. Phase 1 adds fail-closed transition behavior. Mutating
-phases may enter `MANUAL_INTERVENTION_REQUIRED`. `ROLLBACK` remains unreachable
-until a separately specified and approved rollback Tool exists.
+exceptional states. Phase 1 adds fail-closed transition behavior. No phase in
+this plan may make a reserved state reachable without a prior governance
+revision to `docs/STATE_MACHINE.md`. Rollback is always a separate Task and
+ExecutionPlan with a fresh Policy check, applicable Approval, execution, and
+verification; it is never an implicit state transition.
 
 The cross-phase failure mapping is:
 
 | Condition | Runtime state |
 | --- | --- |
-| Policy denial, human rejection, or definite failure before any Tool succeeds | `FAILED` |
-| Definite failure after one or more earlier steps succeeded | `PARTIAL_SUCCESS` |
-| Mutating Tool dispatched, followed by timeout, unknown outcome, or failed verification | `MANUAL_INTERVENTION_REQUIRED` |
+| Policy denial, human rejection, or definite failure before any Tool succeeds | `FAILED`; structured outcome records no confirmed effect |
+| Definite failure after one or more earlier steps succeeded | `FAILED`; structured outcome records prior successes and any confirmed partial effect |
+| Mutating Tool dispatched, followed by timeout, unknown outcome, or failed verification | `FAILED`; structured outcome marks the effect unknown and human intervention required |
 | Every required verification passes | `COMPLETED` |
-| Any request for automatic rollback through Phase 11 | Rejected; `ROLLBACK` is unreachable |
+| Any rollback request | Create a separate governed Task and Plan; `ROLLBACK` remains unreachable |
 
 Only Runtime changes Task state.
 
@@ -175,6 +179,13 @@ Only Runtime changes Task state.
   permissions, or executable callbacks.
 - `Target`: immutable `target_id` and trusted local configuration reference;
   model output never supplies connection fields.
+- `BootstrapContext`: bounded Task, trusted Target, and sanitized Memory fields
+  available before remote evidence retrieval.
+- `ContextProfile`: immutable Profile ID, Version, Content Hash, exact
+  read-only Tool references, trusted argument bindings, budgets, and stop
+  conditions.
+- `ContextProfileRegistryRecord`: Profile status, Hash binding, reviewer, and
+  timestamps stored outside immutable Profile content.
 - `ObservationRequest`: Runtime-owned, typed read request generated from a
   versioned local context profile.
 - `ExecutionStep`: step ID, Tool name and version, exact typed arguments,
@@ -194,7 +205,10 @@ Only Runtime changes Task state.
 - `PolicyDecision`: allow/deny, reason code, resolved risk, and required
   approval mode.
 - `ApprovalRecord`: plan hash, exact ordered arguments, approver, approval mode,
-  issued-at, expires-at, and optional L3 confirmation timestamp.
+  issued-at, and expires-at.
+- `ManualConfirmationRecord`: Approval ID, plan hash, exact L3 step ID,
+  canonical arguments hash, confirmer, execution-attempt ID, issued-at,
+  short expires-at, and one-time consumption event.
 - `ExecutionReport`: ordered calls, results, durations, dispatch certainty, and
   redacted audit references.
 - `VerificationResult`: success, criteria, structured evidence references, and
@@ -218,7 +232,7 @@ empty future interfaces:
 | ApprovalRecord | Phase 4 |
 | ExecutionReport | Phase 5 |
 | VerificationResult | Phase 6 |
-| Target and ObservationRequest | Phase 8 |
+| Target, BootstrapContext, ContextProfile, ContextProfileRegistryRecord, and ObservationRequest | Phase 8 |
 | IncidentRecord | Phase 9 |
 
 Task state changes only through Runtime. Plan, Tool Metadata, calls, approval
@@ -226,25 +240,29 @@ snapshots, and reports are immutable once accepted.
 
 ### 2.6 Approval hashing
 
-The plan hash is SHA-256 over UTF-8 canonical JSON with sorted object keys and
-stable separators. The hash input includes:
+The Plan Hash algorithm and coverage are normative in
+`docs/ARCHITECTURE.md#plan-integrity-and-hash`. It is SHA-256 over UTF-8 RFC
+8785 canonical JSON after strict Plan Schema validation. The hash input
+includes every behavior-visible field, at least:
 
 - plan schema version;
-- task ID and target;
+- task ID, plan ID, target reference, and target scope;
 - ordered step IDs and roles;
-- Tool name and Tool version for every step;
+- Tool ID, Version, Contract Hash, and Implementation Hash for every step;
 - exact validated arguments;
-- reason and impact;
-- verification criteria;
-- recovery or rollback guidance.
+- expected evidence, verification criteria, and execution order;
+- rollback guidance or explicit `not_available`;
+- selected Skill ID, Version, and Content Hash;
+- reason, impact, limitations, and declared side effects.
 
 The hash excludes the hash field itself, ApprovalRecord data, and volatile
 display timestamps. Approval validation recomputes the hash immediately before
 execution and before every mutating step, and also compares the stored ordered
-arguments. Approval is consumed once execution dispatch begins. L3 uses the same
-hash and requires an additional, separately timestamped Commit confirmation
-after Review and immediately before execution; local single-user mode does not
-require a different second person. It does not allow a changed plan.
+arguments. Approval is consumed once execution dispatch begins. Every L3 Tool
+invocation uses the same plan hash and requires its own separately timestamped,
+single-use Manual Confirmation immediately before that exact Step is
+dispatched; local single-user mode does not require a different second person.
+It does not allow a changed Plan, Step, or Arguments.
 
 Consumption binds the approval to one unique execution attempt. It remains
 usable only by that in-progress attempt, subject to expiration and hash
@@ -268,7 +286,7 @@ revalidation, and can never start a second attempt.
 
 ## Phase 0 — Foundation
 
-Status: Complete (2026-07-25)
+Status: Baseline implemented (2026-07-25); approval-gate conformance pending
 
 ### Goal
 
@@ -311,7 +329,8 @@ Runtime boundaries without touching a real system.
 - `ai-server doctor` performs no network, filesystem mutation, database,
   process, SSH, Docker, or model operation.
 - The Mock Tool is statically L0 in Tool Metadata and returns a typed payload.
-- The Runtime records exactly the seven-state L0 happy path.
+- The Runtime records the exact governed L0 happy path, including the
+  `WAITING_FOR_APPROVAL` decision gate.
 - Planner returns a plan and has no Tool dependency.
 - Policy reads Tool Metadata and allows the L0 mock deterministically.
 - Executor alone calls the Mock Tool.
@@ -341,7 +360,7 @@ agents, and cloud services.
 
 ## Phase 1 — Runtime
 
-Status: Complete (2026-07-25)
+Status: Baseline implemented (2026-07-25); approval-gate conformance pending
 
 ### Goal
 
@@ -375,9 +394,12 @@ orchestrator while keeping all external behavior mocked.
 
 - No application service bypasses Runtime to execute a task.
 - Every state change passes through the transition validator.
+- `POLICY_CHECK → EXECUTING` is rejected. Every allowed Plan enters
+  `WAITING_FOR_APPROVAL`; `NOT_REQUIRED` records an Approval Decision and exits
+  immediately to `EXECUTING`.
 - Any unrecoverable error from an active nonterminal state records `FAILED`
   before returning a structured failure or raising its documented exception.
-- Approval-required work stops at `WAITING_FOR_APPROVAL`, returns control
+- Human-approval-required work stops at `WAITING_FOR_APPROVAL`, returns control
   without a Tool call, and cannot resume until Phase 4 supplies a valid
   ApprovalRecord. Human rejection enters `FAILED`.
 - `COMPLETED` and `FAILED` are immutable terminal states in Phase 1.
@@ -390,6 +412,9 @@ orchestrator while keeping all external behavior mocked.
 ### Test Requirements
 
 - A transition matrix tests every permitted and rejected pair.
+- Tests assert the exact L0 state/event sequence includes
+  `POLICY_CHECK → WAITING_FOR_APPROVAL → EXECUTING` and that direct bypass is
+  rejected.
 - Failure injection covers Context Builder, Planner, Policy, Executor, and
   Verifier.
 - Tests assert a single `FAILED` transition and no component calls after
@@ -480,8 +505,11 @@ deterministic and independent of model reasoning.
 ### Outputs
 
 - A PolicyDecision for the plan and each step.
-- Stable `ALLOW`, `DENY`, `REQUIRE_APPROVAL`, or
-  `REQUIRE_MANUAL_CONFIRMATION` outcomes and reasons.
+- Stable `decision: ALLOW | DENY`, reason codes, and a separate
+  `approval_requirement: NOT_REQUIRED | HUMAN_PLAN_APPROVAL`.
+- For each L3 Step, a separate
+  `manual_confirmation_requirement: PER_INVOCATION`; it is not a third
+  Policy decision value.
 
 ### Deliverables
 
@@ -490,7 +518,8 @@ deterministic and independent of model reasoning.
   - L0: automatic when Tool and target are allowed.
   - L1: allowed or denied by explicit read policy.
   - L2: allowed only with exact-plan approval.
-  - L3: allowed only with exact-plan approval and second confirmation.
+  - L3: allowed only with exact-plan approval and a per-invocation Manual
+    Confirmation.
 - Target and Tool allowlists.
 - Validation that plan references match registered Tool Metadata.
 
@@ -540,7 +569,8 @@ unexpired ExecutionPlan.
 
 - An immutable ApprovalRecord.
 - A structured approval validation result.
-- An audit event for approve, reject, expire, invalidate, and L3 confirm.
+- Audit events for approve, reject, expire, invalidate, and per-Step L3
+  confirmation.
 
 ### Deliverables
 
@@ -549,7 +579,8 @@ unexpired ExecutionPlan.
   every step.
 - Approval issuance with explicit expiration.
 - Approval revalidation immediately before Executor dispatch.
-- L3 second confirmation for the unchanged hash immediately before execution.
+- A single-use L3 confirmation bound to the unchanged Plan, exact Step and
+  Arguments immediately before each L3 invocation.
 - One-time approval consumption when execution dispatch begins.
 - An in-process `ai-server run` Review/Commit interaction that displays the
   exact plan and hash; Phase 4 stops after recording authorization, and Phase 5
@@ -566,7 +597,8 @@ unexpired ExecutionPlan.
   wrong-mode, or wrong-plan approval is unusable.
 - Consumption binds approval to one execution-attempt ID; only that in-progress
   attempt may continue to revalidate it, and it cannot authorize a retry.
-- L3 requires both base approval and a second confirmation of the same hash.
+- L3 requires base Plan approval plus a separate valid confirmation for every
+  L3 Step invocation.
 - In local single-user mode the two L3 events may have the same approver, but
   they are separate, ordered, timestamped actions.
 - Phase 4 storage and CLI interaction are in one process; persistence and
@@ -578,7 +610,8 @@ unexpired ExecutionPlan.
 - Mutation tests change each hash input independently and expect rejection.
 - Clock-controlled tests cover expiry boundaries.
 - Tests cover L2 success, missing approval, rejected approval, invalidation,
-  L3 without confirmation, L3 confirmation, and hash mismatch.
+  L3 without confirmation, per-Step L3 confirmation, confirmation replay,
+  multiple L3 Steps, expiry, and hash mismatch.
 - Serialization never includes secrets or unredacted arguments.
 
 ### Out of Scope
@@ -625,8 +658,8 @@ planning or changing authority.
   changes order.
 - Unknown, denied, expired, or tampered work is rejected before invocation.
 - On a failed step, later steps do not run.
-- A definite first-step failure enters `FAILED`; a definite failure after at
-  least one successful step enters `PARTIAL_SUCCESS`.
+- Any definite step failure enters `FAILED`. The structured outcome preserves
+  which earlier steps succeeded and whether they produced a confirmed effect.
 - All successful action steps enter `VERIFYING`; Executor never returns
   `COMPLETED`.
 - A retry requires a new explicit Runtime action; dangerous work is never
@@ -638,8 +671,9 @@ planning or changing authority.
 - Recording Fake Tools assert exact order and arguments.
 - Tests cover no-approval, expired approval, hash mismatch, policy denial,
   unknown Tool, timeout, malformed result, mid-plan failure, and stop behavior.
-- Tests distinguish first-step `FAILED` from later `PARTIAL_SUCCESS` and assert
-  successful execution enters only `VERIFYING`.
+- Tests distinguish first-step failure from a later failure by structured
+  outcome facts while asserting both enter `FAILED`; successful execution
+  enters only `VERIFYING`.
 - Tests prove no invocation occurs before all preconditions pass.
 - Tests prove Context Builder and Verifier receive evidence but never call the
   gateway.
@@ -689,9 +723,9 @@ evidence without gaining execution authority.
   and sufficiently fresh evidence.
 - Missing, stale, malformed, or contradictory evidence produces failure.
 - A verification failure stops Runtime; it cannot initiate retry or rollback.
-- Non-mutating verification failure enters `FAILED`. If a mutation was
-  dispatched and cannot be verified, Runtime enters
-  `MANUAL_INTERVENTION_REQUIRED`.
+- Every verification failure enters `FAILED`. If a mutation was dispatched and
+  cannot be verified, the structured outcome marks the remote effect unknown
+  and requires human intervention.
 - Verification evidence and reasons are structured and redacted.
 
 ### Test Requirements
@@ -802,8 +836,11 @@ without exposing SSH or command execution to Planner or users.
 - An AsyncSSH transport internal to the Tool layer.
 - Typed read-only Tools with fixed operation identifiers and strict argument
   validation.
-- Target and deterministic ObservationRequest contracts for
-  `CONTEXT_BUILDING`.
+- Normative Context Profile and Context Profile Registry Record schemas.
+- Target, BootstrapContext, Context Profile Registry, and deterministic
+  ObservationRequest contracts.
+- Linked, non-recursive `OBSERVATION` Tasks that traverse the complete Runtime
+  lifecycle; no hidden Tool execution inside parent `CONTEXT_BUILDING`.
 - Mandatory host-key verification, connection timeout, operation timeout,
   output limits, and redaction.
 - No public `exec`, command string, session, or raw SSH client API.
@@ -811,6 +848,12 @@ without exposing SSH or command execution to Planner or users.
 ### Acceptance Criteria
 
 - Every remote read is Policy-checked and dispatched only by Executor.
+- Every remote context read belongs to a linked `OBSERVATION` Task with an
+  exact Profile ID, Version, Hash, Target, Arguments, Plan Hash, and terminal
+  structured result.
+- L1 observation work pauses in its child `WAITING_FOR_APPROVAL` state when
+  Policy requires Human Execution Approval; the parent never bypasses it.
+- An Observation Task cannot create another Observation Task.
 - Only a fixed allowlist of L0/L1 read operations can reach the transport.
 - System, service, network, and container status Tools are L0; bounded log reads
   are L1 and require an explicit L1 allow rule.
@@ -832,6 +875,9 @@ without exposing SSH or command execution to Planner or users.
   output truncation, invalid encoding, allowlist rejection, and redaction.
 - Tests cover unknown target IDs, attempted connection-field overrides, TOFU
   rejection, absence of SSH agent, and fixed-operation enforcement.
+- Tests cover Profile Schema/Hash drift, deterministic Profile selection,
+  ambiguous selection, linked lifecycle order, L0 `NOT_REQUIRED`, L1 approval
+  pause, child failure, parent evidence handoff, and recursion rejection.
 - Injection-oriented tests cover host, service, container, and log selector
   arguments.
 - Policy tests cover every L0/L1 Tool.
@@ -903,9 +949,10 @@ Memory to influence authority.
 - Every schema change requires migration, documentation, and tests.
 - Historical context is bounded and treated as untrusted facts, not authority.
 - If otherwise verified work cannot be persisted, the transaction rolls back,
-  Runtime enters `PARTIAL_SUCCESS`, and a structured storage error is returned.
-  There is no silent retry; an explicit replay uses the unique attempt key to
-  prevent duplicates.
+  Runtime enters `FAILED`, and a structured storage error records that the
+  remote effect was verified but the local evidence commit failed. There is no
+  silent retry; an explicit replay uses the unique attempt key to prevent
+  duplicates.
 
 ### Test Requirements
 
@@ -913,7 +960,8 @@ Memory to influence authority.
   history, foreign-key relationships, transaction rollback, prohibited fields,
   redaction, and migration replay.
 - Tests prove append-only behavior, unique-attempt handling, no update/delete
-  business API, and the persistence-failure `PARTIAL_SUCCESS` transition.
+  business API, and the persistence-failure transition to `FAILED` with an
+  explicit evidence-persistence disposition.
 - Crash-recovery tests cover `ATTEMPT_STARTED` without dispatch,
   `DISPATCH_INTENT` without result, result without final Incident, and explicit
   replay without duplicate records.
@@ -982,8 +1030,9 @@ with fresh independent evidence.
 - Verifier does not perform I/O.
 - A rejection or definite failure before dispatch enters `FAILED` with no
   remote mutation. Once restart has been dispatched, failure, timeout, unknown
-  outcome, or failed verification stops Runtime and enters
-  `MANUAL_INTERVENTION_REQUIRED` with redacted recovery guidance.
+  outcome, or failed verification also enters `FAILED`; its structured outcome
+  marks the possible remote effect and human intervention requirement, with
+  redacted recovery guidance.
 - Executor dispatches restart exactly once and never retries it.
 - No automatic rollback or false claim that a restart can be undone is made.
   Pre-state is evidence for human recovery guidance, not an automatic action.
@@ -1058,8 +1107,9 @@ state and configured health without exposing Docker or Shell authority.
   not exist, verification fails closed.
 - A rejection or definite failure before dispatch enters `FAILED` with no
   mutation. Once dispatched, failure, timeout, unknown identity/outcome, or
-  failed verification enters `MANUAL_INTERVENTION_REQUIRED`; no automatic retry
-  or rollback is attempted.
+  failed verification also enters `FAILED`; its structured outcome marks the
+  possible remote effect and human intervention requirement. No automatic
+  retry or rollback is attempted.
 - Remote permissions are pre-provisioned as a precise minimal capability;
   Runtime never grants docker-group membership or changes server permissions.
 
