@@ -1,0 +1,21 @@
+{
+  "profile_schema_version": "1",
+  "policy_id": "local-default",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "rule_id": "local-mock-get-system-status",
+      "operator_id": "local-user",
+      "target": {
+        "target_id": "local-mock",
+        "resource_type": "local_system",
+        "resource_id": "local-mock"
+      },
+      "tool_id": "get_system_status",
+      "tool_version": "1.0.0",
+      "contract_hash": "90e2295d172ba8188d986e4aee9ce9665a8b8e2d6694b8ef4015ef711d820a94",
+      "implementation_hash": "6ac7ae58ab08b6cff2ded41c82091d6e727291d1e0d5cad7ae38afb32dec9746",
+      "minimum_approval": "NOT_REQUIRED"
+    }
+  ]
+}

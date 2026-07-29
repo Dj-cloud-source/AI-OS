@@ -385,6 +385,8 @@ class ToolMetadata(BaseModel):
     implementation_hash: HashDigest
     description: str = Field(min_length=1, max_length=512)
     risk_level: RiskLevel
+    side_effects: ToolSideEffects
+    target_scope: ToolTargetScope
     timeout_ms: int = Field(ge=1, le=3_600_000)
     idempotent: bool
     input_schema_id: str = Field(min_length=1, max_length=512)

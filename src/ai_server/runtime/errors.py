@@ -1,12 +1,9 @@
-"""Explicit domain exceptions for the Phase 1 Runtime."""
+"""Explicit domain exceptions for the local Runtime."""
 
 from typing import ClassVar
 
-
-class AiServerError(Exception):
-    """Base exception for expected Runtime failures."""
-
-    code: ClassVar[str] = "ai_server_error"
+from ai_server.errors import AiServerError
+from ai_server.policy.errors import PolicyEvaluationError
 
 
 class InvalidTaskError(AiServerError):
@@ -97,6 +94,7 @@ __all__ = [
     "InvalidStateTransitionError",
     "PlanMismatchError",
     "PolicyDeniedError",
+    "PolicyEvaluationError",
     "ReservedStateTransitionError",
     "TerminalStateMutationError",
     "ToolExecutionError",

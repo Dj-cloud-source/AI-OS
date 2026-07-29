@@ -1,8 +1,9 @@
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from inspect import signature
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -11,7 +12,14 @@ import pytest
 from ai_server.context.builder import ContextBuilder
 from ai_server.executor.service import Executor
 from ai_server.models.context import RuntimeContext
-from ai_server.models.execution import ExecutionPlan
+from ai_server.models.execution import ExecutionPlan, StepRole
+from ai_server.models.policy import (
+    PolicyApprovalRequirement,
+    PolicyDecision,
+    PolicyEffect,
+    PolicyEvaluationContext,
+    PolicyReasonCode,
+)
 from ai_server.models.runtime import (
     LifecycleEvent,
     LifecycleEventKind,
@@ -22,6 +30,7 @@ from ai_server.models.runtime import (
 from ai_server.models.system_status import SystemStatus
 from ai_server.models.task import Task
 from ai_server.models.tool import (
+    RiskLevel,
     TargetReference,
     ToolError,
     ToolErrorCategory,
@@ -29,10 +38,9 @@ from ai_server.models.tool import (
     ToolResult,
 )
 from ai_server.planner.service import SUPPORTED_REQUEST, Planner
-from ai_server.policy.engine import PolicyEngine, ToolKey
+from ai_server.policy.engine import PolicyEngine
 from ai_server.runtime.engine import RuntimeEngine
 from ai_server.runtime.errors import (
-    ApprovalRequiredError,
     ApprovalResumeUnavailableError,
     InvalidClockError,
     InvalidRuntimeOutcomeError,
@@ -40,6 +48,7 @@ from ai_server.runtime.errors import (
     InvalidTaskError,
     PlanMismatchError,
     PolicyDeniedError,
+    PolicyEvaluationError,
     TerminalStateMutationError,
     ToolExecutionError,
     UnsupportedTaskError,
@@ -59,7 +68,7 @@ SENSITIVE_MARKER = "SENSITIVE_RUNTIME_MARKER"
 class Trace:
     calls: list[str] = field(default_factory=list)
     fail_at: str | None = None
-    error: Exception | None = None
+    error: BaseException | None = None
 
     def record(self, stage: str) -> None:
         self.calls.append(stage)
@@ -89,17 +98,49 @@ class RecordingPlanner(Planner):
         return super().create_plan(context, metadata)
 
 
-class RecordingPolicy(PolicyEngine):
-    def __init__(self, trace: Trace) -> None:
-        self._trace = trace
+type PolicyEvaluate = Callable[
+    [ExecutionPlan, PolicyEvaluationContext],
+    PolicyDecision,
+]
 
-    def check(
-        self,
+
+def replace_policy_evaluate(
+    runtime: RuntimeEngine,
+    evaluate: PolicyEvaluate,
+) -> None:
+    """Replace only the private Policy call in a fully constructed test Runtime."""
+    runtime._policy.evaluate = evaluate  # type: ignore[assignment]
+
+
+def install_recording_policy(
+    runtime: RuntimeEngine,
+    trace: Trace,
+    *,
+    approval_requirement: PolicyApprovalRequirement | None = None,
+) -> None:
+    """Wrap the Runtime-owned Policy without reopening constructor injection."""
+    trusted_evaluate = runtime._policy.evaluate
+
+    def evaluate(
         plan: ExecutionPlan,
-        catalog: Mapping[ToolKey, ToolMetadata],
-    ) -> None:
-        self._trace.record("policy")
-        return super().check(plan, catalog)
+        context: PolicyEvaluationContext,
+    ) -> PolicyDecision:
+        trace.record("policy")
+        decision = trusted_evaluate(plan, context)
+        if approval_requirement is not None:
+            steps = tuple(
+                step.model_copy(update={"approval_requirement": approval_requirement})
+                for step in decision.step_decisions
+            )
+            decision = decision.model_copy(
+                update={
+                    "approval_requirement": approval_requirement,
+                    "step_decisions": steps,
+                }
+            )
+        return decision
+
+    replace_policy_evaluate(runtime, evaluate)
 
 
 class RecordingExecutor(Executor):
@@ -169,14 +210,14 @@ def clock_values(count: int) -> list[datetime]:
 def make_runtime(
     trace: Trace,
     *,
-    clock: SequenceClock | None = None,
+    clock: Callable[[], datetime] | None = None,
     executor: Executor | None = None,
+    approval_requirement: PolicyApprovalRequirement | None = None,
 ) -> RuntimeEngine:
     registry = build_default_registry()
-    return RuntimeEngine(
+    runtime = RuntimeEngine(
         context_builder=RecordingContextBuilder(trace),
         planner=RecordingPlanner(trace),
-        policy=RecordingPolicy(trace),
         executor=(
             executor
             if executor is not None
@@ -189,6 +230,12 @@ def make_runtime(
         registry=registry,
         clock=clock if clock is not None else lambda: datetime.now(UTC),
     )
+    install_recording_policy(
+        runtime,
+        trace,
+        approval_requirement=approval_requirement,
+    )
+    return runtime
 
 
 def make_structured_result(
@@ -310,6 +357,17 @@ def test_runtime_completes_with_exact_state_and_event_history() -> None:
     assert [event.sequence for event in outcome.events] == list(range(14))
     assert [event.occurred_at for event in outcome.events] == timestamps
     assert len(outcome.results) == 1
+    assert outcome.plan is not None
+    assert outcome.policy_decision is not None
+    assert outcome.policy_decision.task_id == outcome.task.task_id
+    assert outcome.policy_decision.plan_id == outcome.plan.plan_id
+    assert outcome.policy_decision.operator_id == outcome.task.user
+    assert outcome.policy_decision.target == TargetReference(
+        target_id=outcome.task.target,
+        resource_type="local_system",
+        resource_id=outcome.task.target,
+    )
+    assert outcome.policy_decision.effective_risk is RiskLevel.L0
 
 
 @pytest.mark.parametrize(
@@ -342,9 +400,9 @@ def test_runtime_completes_with_exact_state_and_event_history() -> None:
         ),
         (
             "policy",
-            PolicyDeniedError(SENSITIVE_MARKER),
+            PolicyEvaluationError(SENSITIVE_MARKER),
             RuntimeComponent.POLICY,
-            "policy_denied",
+            "policy_evaluation_failed",
             ["context", "planner", "policy"],
             (
                 RuntimeState.RECEIVED,
@@ -422,7 +480,7 @@ def test_known_component_failures_close_once_without_downstream_calls(
     [
         ("context", RuntimeComponent.CONTEXT_BUILDER, "context_builder_failure"),
         ("planner", RuntimeComponent.PLANNER, "planner_failure"),
-        ("policy", RuntimeComponent.POLICY, "policy_failure"),
+        ("policy", RuntimeComponent.POLICY, "policy_evaluation_failed"),
         ("executor", RuntimeComponent.EXECUTOR, "executor_failure"),
         ("verifier", RuntimeComponent.VERIFIER, "verifier_failure"),
     ],
@@ -447,11 +505,62 @@ def test_unexpected_component_failures_are_redacted(
 
 
 @pytest.mark.parametrize(
+    ("stage", "component", "code", "expected_calls"),
+    [
+        (
+            "context",
+            RuntimeComponent.CONTEXT_BUILDER,
+            "context_builder_failure",
+            ["context"],
+        ),
+        (
+            "planner",
+            RuntimeComponent.PLANNER,
+            "planner_failure",
+            ["context", "planner"],
+        ),
+        (
+            "executor",
+            RuntimeComponent.EXECUTOR,
+            "executor_failure",
+            ["context", "planner", "policy", "executor"],
+        ),
+        (
+            "verifier",
+            RuntimeComponent.VERIFIER,
+            "verifier_failure",
+            ["context", "planner", "policy", "executor", "tool", "verifier"],
+        ),
+    ],
+)
+def test_component_system_exit_is_sanitized_without_downstream_calls(
+    stage: str,
+    component: RuntimeComponent,
+    code: str,
+    expected_calls: list[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    marker = f"SENSITIVE_{stage.upper()}_SYSTEM_EXIT"
+    trace = Trace(fail_at=stage, error=SystemExit(marker))
+    caplog.set_level(logging.INFO)
+
+    outcome = make_runtime(trace).run(Task(request=SUPPORTED_REQUEST))
+
+    assert outcome.status is RuntimeOutcomeStatus.FAILED
+    assert outcome.failure is not None
+    assert outcome.failure.component is component
+    assert outcome.failure.code == code
+    assert trace.calls == expected_calls
+    assert marker not in outcome.model_dump_json()
+    assert marker not in caplog.text
+
+
+@pytest.mark.parametrize(
     ("stage", "error", "expected_code"),
     [
         ("planner", UnsupportedTaskError("safe"), "unsupported_task"),
         ("planner", PlanMismatchError("safe"), "plan_mismatch"),
-        ("policy", PolicyDeniedError("safe"), "policy_denied"),
+        ("policy", PolicyEvaluationError("safe"), "policy_evaluation_failed"),
         ("executor", ToolExecutionError("safe"), "tool_execution"),
         ("verifier", VerificationError("safe"), "verification"),
     ],
@@ -474,14 +583,59 @@ def test_exception_instance_cannot_override_stable_failure_code(
 
 
 def test_non_none_policy_return_fails_closed_before_tool() -> None:
-    class InvalidReturnPolicy(PolicyEngine):
-        def check(
+    class CountingExecutor(Executor):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def execute(self, plan: ExecutionPlan) -> tuple[ToolResult[SystemStatus], ...]:
+            del plan
+            self.calls += 1
+            return ()
+
+    executor = CountingExecutor()
+    registry = build_default_registry()
+    runtime = RuntimeEngine(
+        executor=executor,
+        registry=registry,
+    )
+
+    def invalid_evaluate(
+        plan: ExecutionPlan,
+        context: PolicyEvaluationContext,
+    ) -> PolicyDecision:
+        del plan, context
+        return cast(PolicyDecision, False)
+
+    replace_policy_evaluate(runtime, invalid_evaluate)
+    outcome = runtime.run(Task(request=SUPPORTED_REQUEST))
+
+    assert outcome.status is RuntimeOutcomeStatus.FAILED
+    assert outcome.failure is not None
+    assert outcome.failure.code == "policy_evaluation_failed"
+    assert outcome.policy_decision is None
+    assert executor.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("tool_id", "unknown_tool"),
+        ("tool_version", "9.9.9"),
+    ],
+)
+def test_unknown_planned_tool_is_structurally_denied_without_executor(
+    field: str,
+    value: str,
+) -> None:
+    class UnknownToolPlanner(Planner):
+        def create_plan(
             self,
-            plan: ExecutionPlan,
-            catalog: Mapping[ToolKey, ToolMetadata],
-        ) -> None:
-            del plan, catalog
-            return False  # type: ignore[return-value]
+            context: RuntimeContext,
+            metadata: ToolMetadata,
+        ) -> ExecutionPlan:
+            plan = super().create_plan(context, metadata)
+            step = plan.steps[0].model_copy(update={field: value})
+            return plan.model_copy(update={"steps": (step,)})
 
     class CountingExecutor(Executor):
         def __init__(self) -> None:
@@ -493,43 +647,307 @@ def test_non_none_policy_return_fails_closed_before_tool() -> None:
             return ()
 
     executor = CountingExecutor()
-
     outcome = RuntimeEngine(
-        policy=InvalidReturnPolicy(),
+        planner=UnknownToolPlanner(),
         executor=executor,
     ).run(Task(request=SUPPORTED_REQUEST))
 
     assert outcome.status is RuntimeOutcomeStatus.FAILED
     assert outcome.failure is not None
+    assert outcome.failure.component is RuntimeComponent.POLICY
     assert outcome.failure.code == "policy_denied"
+    assert outcome.policy_decision is not None
+    assert outcome.policy_decision.effect is PolicyEffect.DENY
+    assert outcome.policy_decision.reason_code is PolicyReasonCode.UNKNOWN_TOOL
+    assert outcome.policy_decision.effective_risk is None
     assert executor.calls == 0
+    assert RuntimeState.EXECUTING not in outcome.task.state_history
 
 
-def test_falsey_injected_policy_is_not_replaced_by_default() -> None:
-    class FalseyDenyPolicy(PolicyEngine):
+@pytest.mark.parametrize(
+    "field",
+    ["contract_hash", "implementation_hash"],
+)
+def test_plan_integrity_drift_is_structurally_denied_without_executor(
+    field: str,
+) -> None:
+    class IntegrityDriftPlanner(Planner):
+        def create_plan(
+            self,
+            context: RuntimeContext,
+            metadata: ToolMetadata,
+        ) -> ExecutionPlan:
+            plan = super().create_plan(context, metadata)
+            step = plan.steps[0].model_copy(update={field: "d" * 64})
+            return plan.model_copy(update={"steps": (step,)})
+
+    class CountingExecutor(Executor):
         def __init__(self) -> None:
             self.calls = 0
 
-        def __bool__(self) -> bool:
-            return False
-
-        def check(
-            self,
-            plan: ExecutionPlan,
-            catalog: Mapping[ToolKey, ToolMetadata],
-        ) -> None:
-            del plan, catalog
+        def execute(self, plan: ExecutionPlan) -> tuple[ToolResult[SystemStatus], ...]:
+            del plan
             self.calls += 1
-            raise PolicyDeniedError("explicit deny")
+            return ()
 
-    policy = FalseyDenyPolicy()
-
-    outcome = RuntimeEngine(policy=policy).run(Task(request=SUPPORTED_REQUEST))
+    executor = CountingExecutor()
+    outcome = RuntimeEngine(
+        planner=IntegrityDriftPlanner(),
+        executor=executor,
+    ).run(Task(request=SUPPORTED_REQUEST))
 
     assert outcome.status is RuntimeOutcomeStatus.FAILED
     assert outcome.failure is not None
+    assert outcome.failure.component is RuntimeComponent.POLICY
     assert outcome.failure.code == "policy_denied"
-    assert policy.calls == 1
+    assert outcome.policy_decision is not None
+    assert outcome.policy_decision.effect is PolicyEffect.DENY
+    assert outcome.policy_decision.reason_code is PolicyReasonCode.TOOL_INTEGRITY_MISMATCH
+    assert executor.calls == 0
+    assert RuntimeState.EXECUTING not in outcome.task.state_history
+
+
+def test_runtime_constructor_does_not_expose_policy_injection() -> None:
+    class ForgedPolicy(PolicyEngine):
+        pass
+
+    registry = build_default_registry()
+    forged = ForgedPolicy(registry)
+    construct = cast(Callable[..., RuntimeEngine], RuntimeEngine)
+
+    assert "policy" not in signature(RuntimeEngine).parameters
+    with pytest.raises(TypeError, match="policy"):
+        construct(policy=forged, registry=registry)
+
+    runtime = RuntimeEngine(registry=registry)
+    assert type(runtime._policy) is PolicyEngine
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "policy_id",
+        "policy_version",
+        "policy_hash",
+        "task_id",
+        "plan_id",
+        "operator_id",
+        "target",
+        "step_contract_hash",
+        "step_implementation_hash",
+        "arguments_hash",
+        "risk",
+        "approval_mismatch",
+        "l1_reason_on_l0",
+        "l3_reason_on_l0",
+    ],
+)
+def test_tampered_policy_decision_fails_closed_without_dispatch(
+    mutation: str,
+) -> None:
+    class CountingExecutor(Executor):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def execute(self, plan: ExecutionPlan) -> tuple[ToolResult[SystemStatus], ...]:
+            del plan
+            self.calls += 1
+            return ()
+
+    registry = build_default_registry()
+    executor = CountingExecutor()
+    runtime = RuntimeEngine(
+        executor=executor,
+        registry=registry,
+    )
+    trusted_evaluate = runtime._policy.evaluate
+
+    def tampering_evaluate(
+        plan: ExecutionPlan,
+        context: PolicyEvaluationContext,
+    ) -> PolicyDecision:
+        decision = trusted_evaluate(plan, context)
+        step = decision.step_decisions[0]
+        if mutation == "policy_id":
+            return decision.model_copy(update={"policy_id": "other-policy"})
+        if mutation == "policy_version":
+            return decision.model_copy(update={"policy_version": "9.9.9"})
+        if mutation == "policy_hash":
+            return decision.model_copy(update={"policy_hash": "d" * 64})
+        if mutation == "task_id":
+            return decision.model_copy(update={"task_id": uuid4()})
+        if mutation == "plan_id":
+            return decision.model_copy(update={"plan_id": uuid4()})
+        if mutation == "operator_id":
+            return decision.model_copy(update={"operator_id": "other-user"})
+        if mutation == "target":
+            return decision.model_copy(
+                update={
+                    "target": TargetReference(
+                        target_id="other-target",
+                        resource_type="local_system",
+                        resource_id="other-target",
+                    )
+                }
+            )
+        if mutation == "step_contract_hash":
+            changed_step = step.model_copy(update={"contract_hash": "d" * 64})
+            return decision.model_copy(update={"step_decisions": (changed_step,)})
+        if mutation == "step_implementation_hash":
+            changed_step = step.model_copy(update={"implementation_hash": "d" * 64})
+            return decision.model_copy(update={"step_decisions": (changed_step,)})
+        if mutation == "arguments_hash":
+            changed_step = step.model_copy(update={"arguments_hash": "d" * 64})
+            return decision.model_copy(update={"step_decisions": (changed_step,)})
+        if mutation == "risk":
+            changed_step = step.model_copy(update={"resolved_risk": RiskLevel.L1})
+            return decision.model_copy(
+                update={
+                    "effective_risk": RiskLevel.L1,
+                    "step_decisions": (changed_step,),
+                }
+            )
+        if mutation in {"l1_reason_on_l0", "l3_reason_on_l0"}:
+            reason = (
+                PolicyReasonCode.L1_RULE_MISSING
+                if mutation == "l1_reason_on_l0"
+                else PolicyReasonCode.L3_CONFIRMATION_UNAVAILABLE
+            )
+            changed_step = step.model_copy(
+                update={
+                    "effect": PolicyEffect.DENY,
+                    "reason_code": reason,
+                }
+            )
+            return decision.model_copy(
+                update={
+                    "effect": PolicyEffect.DENY,
+                    "reason_code": reason,
+                    "step_decisions": (changed_step,),
+                }
+            )
+        changed_step = step.model_copy(
+            update={"approval_requirement": (PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL)}
+        )
+        return decision.model_copy(update={"step_decisions": (changed_step,)})
+
+    replace_policy_evaluate(runtime, tampering_evaluate)
+    outcome = runtime.run(Task(request=SUPPORTED_REQUEST))
+
+    assert outcome.status is RuntimeOutcomeStatus.FAILED
+    assert outcome.failure is not None
+    assert outcome.failure.code == "policy_evaluation_failed"
+    assert outcome.policy_decision is None
+    assert RuntimeState.WAITING_FOR_APPROVAL not in outcome.task.state_history
+    assert executor.calls == 0
+
+
+@pytest.mark.parametrize("hash_field", ["contract_hash", "implementation_hash"])
+def test_allow_decision_cannot_authorize_plan_hash_not_in_registry(
+    hash_field: str,
+) -> None:
+    class TamperedHashPlanner(Planner):
+        def create_plan(
+            self,
+            context: RuntimeContext,
+            metadata: ToolMetadata,
+        ) -> ExecutionPlan:
+            plan = super().create_plan(context, metadata)
+            step = plan.steps[0].model_copy(update={hash_field: "d" * 64})
+            return plan.model_copy(update={"steps": (step,)})
+
+    class CountingExecutor(Executor):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def execute(self, plan: ExecutionPlan) -> tuple[ToolResult[SystemStatus], ...]:
+            del plan
+            self.calls += 1
+            return ()
+
+    executor = CountingExecutor()
+    runtime = RuntimeEngine(
+        planner=TamperedHashPlanner(),
+        executor=executor,
+    )
+    trusted_evaluate = runtime._policy.evaluate
+
+    def forged_allow_evaluate(
+        plan: ExecutionPlan,
+        context: PolicyEvaluationContext,
+    ) -> PolicyDecision:
+        denied = trusted_evaluate(plan, context)
+        step = denied.step_decisions[0].model_copy(
+            update={
+                "effect": PolicyEffect.ALLOW,
+                "reason_code": PolicyReasonCode.ALLOWED,
+            }
+        )
+        return denied.model_copy(
+            update={
+                "effect": PolicyEffect.ALLOW,
+                "reason_code": PolicyReasonCode.ALLOWED,
+                "step_decisions": (step,),
+            }
+        )
+
+    replace_policy_evaluate(runtime, forged_allow_evaluate)
+    outcome = runtime.run(Task(request=SUPPORTED_REQUEST))
+
+    assert outcome.status is RuntimeOutcomeStatus.FAILED
+    assert outcome.failure is not None
+    assert outcome.failure.code == "policy_evaluation_failed"
+    assert outcome.policy_decision is None
+    assert RuntimeState.WAITING_FOR_APPROVAL not in outcome.task.state_history
+    assert executor.calls == 0
+
+
+def test_reordered_multistep_policy_decision_fails_closed_without_dispatch() -> None:
+    class MultiStepPlanner(Planner):
+        def create_plan(
+            self,
+            context: RuntimeContext,
+            metadata: ToolMetadata,
+        ) -> ExecutionPlan:
+            plan = super().create_plan(context, metadata)
+            second = plan.steps[0].model_copy(update={"step_id": "second-status"})
+            return plan.model_copy(update={"steps": (*plan.steps, second)})
+
+    class CountingExecutor(Executor):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def execute(self, plan: ExecutionPlan) -> tuple[ToolResult[SystemStatus], ...]:
+            del plan
+            self.calls += 1
+            return ()
+
+    registry = build_default_registry()
+    executor = CountingExecutor()
+    runtime = RuntimeEngine(
+        planner=MultiStepPlanner(),
+        executor=executor,
+        registry=registry,
+    )
+    trusted_evaluate = runtime._policy.evaluate
+
+    def reordering_evaluate(
+        plan: ExecutionPlan,
+        context: PolicyEvaluationContext,
+    ) -> PolicyDecision:
+        decision = trusted_evaluate(plan, context)
+        return decision.model_copy(
+            update={"step_decisions": tuple(reversed(decision.step_decisions))}
+        )
+
+    replace_policy_evaluate(runtime, reordering_evaluate)
+    outcome = runtime.run(Task(request=SUPPORTED_REQUEST))
+
+    assert outcome.status is RuntimeOutcomeStatus.FAILED
+    assert outcome.failure is not None
+    assert outcome.failure.code == "policy_evaluation_failed"
+    assert outcome.policy_decision is None
+    assert executor.calls == 0
 
 
 def test_non_none_verifier_return_cannot_complete() -> None:
@@ -592,6 +1010,8 @@ def test_structured_tool_failure_stops_before_verifier_and_is_preserved() -> Non
     assert outcome.failure is not None
     assert outcome.failure.component is RuntimeComponent.EXECUTOR
     assert outcome.failure.code == "tool_execution"
+    assert outcome.policy_decision is not None
+    assert outcome.policy_decision.effect is PolicyEffect.ALLOW
     assert len(outcome.results) == 1
     assert outcome.results[0].success is False
     assert outcome.results[0].error is not None
@@ -643,13 +1063,12 @@ def test_runtime_rejects_executor_evidence_not_bound_to_plan(
     assert RuntimeState.VERIFYING not in outcome.task.state_history
 
 
-@pytest.mark.parametrize("risk_label", ["L2", "L3"])
-def test_approval_required_pauses_without_execution(risk_label: str) -> None:
-    trace = Trace(
-        fail_at="policy",
-        error=ApprovalRequiredError(f"{risk_label} approval required"),
+def test_policy_raised_human_approval_pauses_without_execution() -> None:
+    trace = Trace()
+    runtime = make_runtime(
+        trace,
+        approval_requirement=PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL,
     )
-    runtime = make_runtime(trace)
 
     outcome = runtime.run(Task(request=SUPPORTED_REQUEST))
 
@@ -662,6 +1081,12 @@ def test_approval_required_pauses_without_execution(risk_label: str) -> None:
     assert trace.calls == ["context", "planner", "policy"]
     assert outcome.results == ()
     assert outcome.failure is None
+    assert outcome.policy_decision is not None
+    assert outcome.policy_decision.effect is PolicyEffect.ALLOW
+    assert (
+        outcome.policy_decision.approval_requirement
+        is PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL
+    )
     assert outcome.events[-1].kind is LifecycleEventKind.PAUSED
     assert outcome.events[-1].reason_code == "approval_required"
     assert not any(
@@ -674,11 +1099,11 @@ def test_approval_required_pauses_without_execution(risk_label: str) -> None:
 
 
 def test_human_rejection_closes_paused_outcome_without_tool_call() -> None:
-    trace = Trace(
-        fail_at="policy",
-        error=ApprovalRequiredError("approval required"),
+    trace = Trace()
+    runtime = make_runtime(
+        trace,
+        approval_requirement=PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL,
     )
-    runtime = make_runtime(trace)
     paused = runtime.run(Task(request=SUPPORTED_REQUEST))
 
     rejected = runtime.reject(paused)
@@ -691,6 +1116,7 @@ def test_human_rejection_closes_paused_outcome_without_tool_call() -> None:
     assert rejected.failure is not None
     assert rejected.failure.code == "human_rejected"
     assert rejected.failure.component is RuntimeComponent.RUNTIME
+    assert rejected.policy_decision == paused.policy_decision
     assert rejected.events[:-2] == paused.events
     assert rejected.events[-2].kind is LifecycleEventKind.STATE_ENTERED
     assert rejected.events[-1].kind is LifecycleEventKind.REJECTED
@@ -699,11 +1125,11 @@ def test_human_rejection_closes_paused_outcome_without_tool_call() -> None:
 
 def test_reject_only_accepts_valid_waiting_outcome() -> None:
     completed = RuntimeEngine().run(Task(request=SUPPORTED_REQUEST))
-    trace = Trace(
-        fail_at="policy",
-        error=ApprovalRequiredError("approval required"),
-    )
-    paused = make_runtime(trace).run(Task(request=SUPPORTED_REQUEST))
+    trace = Trace()
+    paused = make_runtime(
+        trace,
+        approval_requirement=PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL,
+    ).run(Task(request=SUPPORTED_REQUEST))
     assert paused.plan is not None
     second = paused.plan.steps[0].model_copy(update={"step_id": "second-status"})
     multi_step_plan = paused.plan.model_copy(update={"steps": (*paused.plan.steps, second)})
@@ -725,11 +1151,11 @@ def test_reject_rejects_uuid_subclasses_without_logging_or_leaking(
     identifier_location: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    trace = Trace(
-        fail_at="policy",
-        error=ApprovalRequiredError("approval required"),
-    )
-    paused = make_runtime(trace).run(Task(request=SUPPORTED_REQUEST))
+    trace = Trace()
+    paused = make_runtime(
+        trace,
+        approval_requirement=PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL,
+    ).run(Task(request=SUPPORTED_REQUEST))
     assert paused.plan is not None
     evil_task_id = ExplodingUUID(bytes=paused.task.task_id.bytes)
     evil_plan_id = ExplodingUUID(bytes=paused.plan.plan_id.bytes)
@@ -756,20 +1182,6 @@ def test_reject_rejects_uuid_subclasses_without_logging_or_leaking(
         RuntimeEngine().reject(forged)
 
     assert SENSITIVE_MARKER not in caplog.text
-
-
-def test_l1_policy_denial_returns_failed_without_execution() -> None:
-    trace = Trace(
-        fail_at="policy",
-        error=PolicyDeniedError("L1 denied"),
-    )
-
-    outcome = make_runtime(trace).run(Task(request=SUPPORTED_REQUEST))
-
-    assert outcome.status is RuntimeOutcomeStatus.FAILED
-    assert outcome.failure is not None
-    assert outcome.failure.code == "policy_denied"
-    assert trace.calls == ["context", "planner", "policy"]
 
 
 def test_unsupported_task_and_malformed_plan_return_planner_failures() -> None:
@@ -805,9 +1217,47 @@ def test_unsupported_task_and_malformed_plan_return_planner_failures() -> None:
     assert executor.calls == 0
 
 
-def test_phase_one_rejects_multistep_plan_before_policy_or_tool() -> None:
-    policy_calls = 0
+@pytest.mark.parametrize("role", [StepRole.ACTION, StepRole.VERIFY])
+def test_runtime_rejects_non_observe_step_before_policy_or_execution(
+    role: StepRole,
+) -> None:
+    trace = Trace()
 
+    class NonObservePlanner(RecordingPlanner):
+        def create_plan(
+            self,
+            context: RuntimeContext,
+            metadata: ToolMetadata,
+        ) -> ExecutionPlan:
+            plan = super().create_plan(context, metadata)
+            step = plan.steps[0].model_copy(update={"role": role})
+            return plan.model_copy(update={"steps": (step,)})
+
+    registry = build_default_registry()
+    runtime = RuntimeEngine(
+        context_builder=RecordingContextBuilder(trace),
+        planner=NonObservePlanner(trace),
+        executor=RecordingExecutor(
+            trace,
+            ToolGateway(registry, clock=lambda: 0),
+        ),
+        verifier=RecordingVerifier(trace),
+        registry=registry,
+    )
+    install_recording_policy(runtime, trace)
+
+    outcome = runtime.run(Task(request=SUPPORTED_REQUEST))
+
+    assert outcome.status is RuntimeOutcomeStatus.FAILED
+    assert outcome.failure is not None
+    assert outcome.failure.component is RuntimeComponent.PLANNER
+    assert outcome.failure.code == "plan_mismatch"
+    assert outcome.plan is None
+    assert outcome.policy_decision is None
+    assert trace.calls == ["context", "planner"]
+
+
+def test_valid_multistep_l0_plan_runs_in_order_through_policy_and_execution() -> None:
     class MultiStepPlanner(Planner):
         def create_plan(
             self,
@@ -818,38 +1268,38 @@ def test_phase_one_rejects_multistep_plan_before_policy_or_tool() -> None:
             second = plan.steps[0].model_copy(update={"step_id": "second-status"})
             return plan.model_copy(update={"steps": (*plan.steps, second)})
 
-    class CountingPolicy(PolicyEngine):
-        def check(
-            self,
-            plan: ExecutionPlan,
-            catalog: Mapping[ToolKey, ToolMetadata],
-        ) -> None:
-            nonlocal policy_calls
-            policy_calls += 1
-            return super().check(plan, catalog)
-
-    class CountingExecutor(Executor):
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def execute(self, plan: ExecutionPlan) -> tuple[ToolResult[SystemStatus], ...]:
-            del plan
-            self.calls += 1
-            return ()
-
-    executor = CountingExecutor()
-    outcome = RuntimeEngine(
+    trace = Trace()
+    registry = build_default_registry()
+    runtime = RuntimeEngine(
+        context_builder=RecordingContextBuilder(trace),
         planner=MultiStepPlanner(),
-        policy=CountingPolicy(),
-        executor=executor,
-    ).run(Task(request=SUPPORTED_REQUEST))
+        executor=RecordingExecutor(
+            trace,
+            ToolGateway(registry, clock=lambda: 0),
+        ),
+        verifier=RecordingVerifier(trace),
+        registry=registry,
+    )
+    install_recording_policy(runtime, trace)
+    outcome = runtime.run(Task(request=SUPPORTED_REQUEST))
 
-    assert outcome.status is RuntimeOutcomeStatus.FAILED
-    assert outcome.failure is not None
-    assert outcome.failure.code == "plan_mismatch"
-    assert outcome.plan is None
-    assert policy_calls == 0
-    assert executor.calls == 0
+    assert outcome.status is RuntimeOutcomeStatus.COMPLETED
+    assert outcome.failure is None
+    assert outcome.plan is not None
+    assert outcome.policy_decision is not None
+    assert [step.step_id for step in outcome.plan.steps] == [
+        "get-system-status",
+        "second-status",
+    ]
+    assert [step.step_id for step in outcome.policy_decision.step_decisions] == [
+        "get-system-status",
+        "second-status",
+    ]
+    assert [result.plan_step_id for result in outcome.results] == [
+        "get-system-status",
+        "second-status",
+    ]
+    assert trace.calls == ["context", "policy", "executor", "tool", "verifier"]
 
 
 def test_uuid_subclass_plan_fails_before_policy_or_tool_without_leaking(
@@ -868,14 +1318,15 @@ def test_uuid_subclass_plan_fails_before_policy_or_tool_without_leaking(
     caplog.set_level(logging.INFO)
     registry = build_default_registry()
 
-    outcome = RuntimeEngine(
+    runtime = RuntimeEngine(
         context_builder=RecordingContextBuilder(trace),
         planner=UntrustedIdentifierPlanner(),
-        policy=RecordingPolicy(trace),
         executor=RecordingExecutor(trace, ToolGateway(registry, clock=lambda: 0)),
         verifier=RecordingVerifier(trace),
         registry=registry,
-    ).run(Task(request=SUPPORTED_REQUEST))
+    )
+    install_recording_policy(runtime, trace)
+    outcome = runtime.run(Task(request=SUPPORTED_REQUEST))
 
     assert outcome.status is RuntimeOutcomeStatus.FAILED
     assert outcome.failure is not None
@@ -884,6 +1335,51 @@ def test_uuid_subclass_plan_fails_before_policy_or_tool_without_leaking(
     assert trace.calls == ["context"]
     assert SENSITIVE_MARKER not in outcome.model_dump_json()
     assert SENSITIVE_MARKER not in caplog.text
+
+
+def test_poisoned_exact_plan_model_dump_system_exit_fails_before_policy_or_tool(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    marker = "SENSITIVE_PLAN_MODEL_DUMP_SYSTEM_EXIT"
+    trace = Trace()
+
+    class PoisonedPlanPlanner(RecordingPlanner):
+        def create_plan(
+            self,
+            context: RuntimeContext,
+            metadata: ToolMetadata,
+        ) -> ExecutionPlan:
+            plan = super().create_plan(context, metadata)
+
+            def exiting_model_dump(*args: object, **kwargs: object) -> dict[str, object]:
+                del args, kwargs
+                raise SystemExit(marker)
+
+            object.__setattr__(plan, "model_dump", exiting_model_dump)
+            return plan
+
+    registry = build_default_registry()
+    runtime = RuntimeEngine(
+        context_builder=RecordingContextBuilder(trace),
+        planner=PoisonedPlanPlanner(trace),
+        executor=RecordingExecutor(trace, ToolGateway(registry, clock=lambda: 0)),
+        verifier=RecordingVerifier(trace),
+        registry=registry,
+    )
+    install_recording_policy(runtime, trace)
+    caplog.set_level(logging.INFO)
+
+    outcome = runtime.run(Task(request=SUPPORTED_REQUEST))
+
+    assert outcome.status is RuntimeOutcomeStatus.FAILED
+    assert outcome.failure is not None
+    assert outcome.failure.component is RuntimeComponent.PLANNER
+    assert outcome.failure.code == "plan_mismatch"
+    assert outcome.plan is None
+    assert outcome.policy_decision is None
+    assert trace.calls == ["context", "planner"]
+    assert marker not in outcome.model_dump_json()
+    assert marker not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -963,11 +1459,11 @@ def test_runtime_rejects_task_model_subclass_before_baseexception_can_escape() -
 
 
 def test_reject_rejects_outcome_subclass_before_baseexception_can_escape() -> None:
-    trace = Trace(
-        fail_at="policy",
-        error=ApprovalRequiredError("approval required"),
-    )
-    paused = make_runtime(trace).run(Task(request=SUPPORTED_REQUEST))
+    trace = Trace()
+    paused = make_runtime(
+        trace,
+        approval_requirement=PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL,
+    ).run(Task(request=SUPPORTED_REQUEST))
 
     class ExitingOutcome(RuntimeOutcome):
         def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
@@ -1004,11 +1500,11 @@ def test_reject_rejects_untrusted_event_timezone_without_calling_it() -> None:
             del value
             return "untrusted-test"
 
-    trace = Trace(
-        fail_at="policy",
-        error=ApprovalRequiredError("approval required"),
-    )
-    paused = make_runtime(trace).run(Task(request=SUPPORTED_REQUEST))
+    trace = Trace()
+    paused = make_runtime(
+        trace,
+        approval_requirement=PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL,
+    ).run(Task(request=SUPPORTED_REQUEST))
     untrusted_timezone = ExitingTimezone()
     untrusted_timestamp = datetime(2026, 7, 25, 8, 0, tzinfo=untrusted_timezone)
     forged_event = paused.events[0].model_copy(update={"occurred_at": untrusted_timestamp})
@@ -1092,6 +1588,58 @@ def test_clock_datetime_hooks_cannot_raise_baseexception_before_lifecycle() -> N
 
     assert SENSITIVE_MARKER not in str(caught.value)
     assert caught.value.__cause__ is None
+
+
+def test_clock_system_exit_on_first_read_is_sanitized_and_fails_closed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    marker = "SENSITIVE_FIRST_CLOCK_SYSTEM_EXIT"
+    trace = Trace()
+    caplog.set_level(logging.INFO)
+
+    def exiting_clock() -> datetime:
+        raise SystemExit(marker)
+
+    with pytest.raises(InvalidClockError) as caught:
+        make_runtime(trace, clock=exiting_clock).run(Task(request=SUPPORTED_REQUEST))
+
+    assert trace.calls == []
+    assert marker not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert marker not in caplog.text
+
+
+def test_clock_system_exit_after_execution_returns_sanitized_failed_outcome(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    marker = "SENSITIVE_LATE_CLOCK_SYSTEM_EXIT"
+    values = iter(clock_values(10))
+    trace = Trace()
+    caplog.set_level(logging.INFO)
+
+    def exiting_clock() -> datetime:
+        try:
+            return next(values)
+        except StopIteration:
+            raise SystemExit(marker) from None
+
+    outcome = make_runtime(
+        trace,
+        clock=exiting_clock,
+    ).run(Task(request=SUPPORTED_REQUEST))
+
+    assert outcome.status is RuntimeOutcomeStatus.FAILED
+    assert outcome.failure is not None
+    assert outcome.failure.code == "invalid_clock"
+    assert outcome.failure.component is RuntimeComponent.RUNTIME
+    assert outcome.task.state_history[-2:] == (
+        RuntimeState.EXECUTING,
+        RuntimeState.FAILED,
+    )
+    assert len(outcome.results) == 1
+    assert trace.calls == ["context", "planner", "policy", "executor", "tool"]
+    assert marker not in outcome.model_dump_json()
+    assert marker not in caplog.text
 
 
 def test_clock_datetime_hooks_cannot_raise_baseexception_after_tool() -> None:
@@ -1325,14 +1873,12 @@ def test_clock_failure_while_recording_component_failure_still_closes(
 
 
 def test_clock_failure_while_recording_pause_still_closes_without_tool() -> None:
-    trace = Trace(
-        fail_at="policy",
-        error=ApprovalRequiredError("approval required"),
-    )
+    trace = Trace()
 
     outcome = make_runtime(
         trace,
         clock=SequenceClock(clock_values(8)),
+        approval_requirement=PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL,
     ).run(Task(request=SUPPORTED_REQUEST))
 
     assert outcome.status is RuntimeOutcomeStatus.FAILED
@@ -1350,13 +1896,11 @@ def test_clock_failure_while_recording_pause_still_closes_without_tool() -> None
 def test_clock_failure_during_rejection_returns_structured_failed_outcome(
     valid_clock_reads: int,
 ) -> None:
-    trace = Trace(
-        fail_at="policy",
-        error=ApprovalRequiredError("approval required"),
-    )
+    trace = Trace()
     runtime = make_runtime(
         trace,
         clock=SequenceClock(clock_values(valid_clock_reads)),
+        approval_requirement=PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL,
     )
     paused = runtime.run(Task(request=SUPPORTED_REQUEST))
 
@@ -1393,6 +1937,39 @@ def test_logging_failure_does_not_corrupt_authoritative_outcome(
 
     assert outcome.status is RuntimeOutcomeStatus.COMPLETED
     assert outcome.task.state is RuntimeState.COMPLETED
+
+
+def test_logging_handler_system_exit_cannot_interrupt_allow_lifecycle(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    marker = "SENSITIVE_LOG_HANDLER_SYSTEM_EXIT"
+
+    class ExitingHandler(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def emit(self, record: logging.LogRecord) -> None:
+            del record
+            self.calls += 1
+            raise SystemExit(marker)
+
+    handler = ExitingHandler()
+    runtime_logger = logging.getLogger("ai_server.runtime.engine")
+    trace = Trace()
+    caplog.set_level(logging.INFO)
+    runtime_logger.addHandler(handler)
+    try:
+        outcome = make_runtime(trace).run(Task(request=SUPPORTED_REQUEST))
+    finally:
+        runtime_logger.removeHandler(handler)
+
+    assert outcome.status is RuntimeOutcomeStatus.COMPLETED
+    assert outcome.task.state is RuntimeState.COMPLETED
+    assert trace.calls.count("tool") == 1
+    assert handler.calls > 0
+    assert marker not in outcome.model_dump_json()
+    assert marker not in caplog.text
 
 
 def test_runtime_runs_do_not_share_events_or_state() -> None:
@@ -1439,6 +2016,37 @@ def test_runtime_emits_structured_transition_and_execution_audit_logs(
             "verification": "passed",
         }
     ]
+
+
+def test_runtime_emits_exact_redacted_policy_decision_audit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+
+    outcome = RuntimeEngine().run(Task(request=SUPPORTED_REQUEST))
+    messages = [json.loads(record.message) for record in caplog.records]
+    policy_audits = [message for message in messages if message["event"] == "policy_decision"]
+
+    assert outcome.policy_decision is not None
+    assert outcome.plan is not None
+    assert len(policy_audits) == 1
+    audit = policy_audits[0]
+    step_audit = audit["steps"][0]
+    step = outcome.plan.steps[0]
+    assert audit["task_id"] == str(outcome.task.task_id)
+    assert audit["plan_id"] == str(outcome.plan.plan_id)
+    assert audit["policy_id"] == outcome.policy_decision.policy_id
+    assert audit["policy_version"] == outcome.policy_decision.policy_version
+    assert audit["policy_hash"] == outcome.policy_decision.policy_hash
+    assert audit["effect"] == "ALLOW"
+    assert audit["reason_code"] == "allowed"
+    assert step_audit["tool_id"] == step.tool_id
+    assert step_audit["tool_version"] == step.tool_version
+    assert step_audit["contract_hash"] == step.contract_hash
+    assert step_audit["implementation_hash"] == step.implementation_hash
+    assert step_audit["arguments_hash"] == canonical_json_sha256(step.arguments)
+    assert "arguments" not in step_audit
+    assert "request" not in audit
 
 
 def test_failed_executor_and_verifier_emit_safe_audits(

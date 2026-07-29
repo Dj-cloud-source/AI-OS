@@ -703,6 +703,8 @@ def _metadata_from_contract(
         implementation_hash=implementation_hash,
         description=contract.description,
         risk_level=contract.risk_level,
+        side_effects=contract.side_effects,
+        target_scope=contract.target_scope,
         timeout_ms=contract.timeout_ms,
         idempotent=contract.idempotent,
         input_schema_id=input_schema_id,

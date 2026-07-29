@@ -273,6 +273,8 @@ def _validate_registration_binding[ArgumentsT: BaseModel, PayloadT: BaseModel](
         or contract.version != metadata.version
         or contract.implementation_hash != metadata.implementation_hash
         or contract.risk_level is not metadata.risk_level
+        or contract.side_effects != metadata.side_effects
+        or contract.target_scope != metadata.target_scope
         or contract.timeout_ms != metadata.timeout_ms
         or contract.idempotent is not metadata.idempotent
     ):

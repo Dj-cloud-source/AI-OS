@@ -56,9 +56,11 @@ FORBIDDEN_PACKAGE_IMPORTS = {
     "memory": {"ai_server.approval", "ai_server.policy"},
     "planner": {"ai_server.executor", "ai_server.tools"},
     "policy": {
+        "ai_server.approval",
         "ai_server.executor",
+        "ai_server.memory",
         "ai_server.planner",
-        "ai_server.tools",
+        "ai_server.runtime",
     },
     "tools": {
         "ai_server.approval",
@@ -82,6 +84,16 @@ POLICY_MODEL_ADAPTER_PREFIXES = {
     "ai_server.models.adapters",
     "ai_server.models.llm",
     "ai_server.models.local_model",
+}
+POLICY_ALLOWED_TOOL_IMPORTS = {
+    "ai_server.tools.hashing",
+    "ai_server.tools.registry",
+}
+POLICY_FORBIDDEN_REGISTRY_CALLS = {
+    "_invoke_payload",
+    "_resolve",
+    "freeze",
+    "register",
 }
 
 CONCRETE_CAPABILITY_MODULE = "ai_server.tools.get_system_status"
@@ -418,6 +430,36 @@ def test_architecture_boundaries_have_no_forbidden_imports() -> None:
                 for module in imports
                 if any(has_prefix(module, prefix) for prefix in forbidden_prefixes)
             )
+
+    assert not violations
+
+
+def test_policy_imports_only_read_only_tool_registry_and_hashing_modules() -> None:
+    violations: list[tuple[Path, str]] = []
+    for path in (SRC_ROOT / "policy").rglob("*.py"):
+        violations.extend(
+            (path.relative_to(SRC_ROOT), module)
+            for module in imported_modules(path)
+            if has_prefix(module, "ai_server.tools")
+            if not any(
+                has_prefix(module, allowed_module) for allowed_module in POLICY_ALLOWED_TOOL_IMPORTS
+            )
+        )
+
+    assert not violations
+
+
+def test_policy_does_not_mutate_registry_or_resolve_tool_handlers() -> None:
+    violations: list[tuple[Path, int, str]] = []
+    for path in (SRC_ROOT / "policy").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        violations.extend(
+            (path.relative_to(SRC_ROOT), node.lineno, node.func.attr)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            if isinstance(node.func, ast.Attribute)
+            if node.func.attr in POLICY_FORBIDDEN_REGISTRY_CALLS
+        )
 
     assert not violations
 

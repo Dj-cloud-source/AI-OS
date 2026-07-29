@@ -1,3 +1,4 @@
+from dataclasses import replace
 from functools import wraps
 from typing import cast
 
@@ -5,7 +6,14 @@ import pytest
 
 import ai_server.tools.registry as registry_module
 from ai_server.models.system_status import GetSystemStatusArguments, SystemStatus
-from ai_server.models.tool import ToolMetadata, ToolRegistryRecord, ToolRegistryStatus
+from ai_server.models.tool import (
+    SideEffectKind,
+    ToolMetadata,
+    ToolRegistryRecord,
+    ToolRegistryStatus,
+    ToolSideEffects,
+    ToolTargetScope,
+)
 from ai_server.tools.artifact_loader import (
     ToolArtifactValidationError,
     ValidatedToolArtifacts,
@@ -103,6 +111,8 @@ def test_real_artifacts_register_exact_identity_and_hashes_without_dispatch(
     assert metadata.version == GET_SYSTEM_STATUS_TOOL_VERSION
     assert metadata.contract_hash == expected.contract_hash
     assert metadata.implementation_hash == expected.implementation_hash
+    assert metadata.side_effects == expected.contract.side_effects
+    assert metadata.target_scope == expected.contract.target_scope
     assert record.contract_hash == metadata.contract_hash
     assert record.implementation_hash == metadata.implementation_hash
     assert record.status is ToolRegistryStatus.REGISTERED
@@ -139,6 +149,42 @@ def test_registry_rejects_duplicate_exact_registration() -> None:
 
     with pytest.raises(DuplicateToolRegistrationError, match="already registered"):
         registry.register(definition)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["side_effects", "target_scope"],
+)
+def test_registry_rejects_forged_authoritative_metadata_projection(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    artifacts = load_real_artifacts()
+    forged_projection: ToolSideEffects | ToolTargetScope
+    if field == "side_effects":
+        forged_projection = ToolSideEffects(
+            mutates_remote_state=True,
+            kind=SideEffectKind.SERVICE_STATE_CHANGE,
+        )
+    else:
+        forged_projection = ToolTargetScope(
+            resource_type="other_system",
+            maximum_targets=1,
+            selector_field="target",
+            allow_dynamic_expansion=False,
+        )
+    forged_metadata = artifacts.metadata.model_copy(
+        update={field: forged_projection},
+    )
+    forged_artifacts = replace(artifacts, metadata=forged_metadata)
+    monkeypatch.setattr(
+        registry_module,
+        "load_tool_artifacts",
+        lambda *args, **kwargs: forged_artifacts,
+    )
+
+    with pytest.raises(InvalidToolDefinitionError, match="immutable metadata"):
+        ToolRegistry().register(make_definition())
 
 
 def test_registry_rejects_handler_without_reviewed_entry_point() -> None:

@@ -1,6 +1,6 @@
 # AIOps Agent Runtime Implementation Plan
 
-Status: Phases 0–2 and Approval Gate conformance implemented; Phases 3–11
+Status: Phases 0–3 and Approval Gate conformance implemented; Phases 4–11
 planned
 
 ## 1. Authority and scope
@@ -15,9 +15,9 @@ This plan is subordinate to the following governing documents:
 6. `AGENTS.md`
 
 Implementation proceeds phase by phase. A later phase must not be used to
-justify bypassing an earlier safety gate. Phases 0–2 implement only the local
-Mock Runtime and its fail-closed Tool boundary; they add no real server
-capability.
+justify bypassing an earlier safety gate. Phases 0–3 implement only the local
+Mock Runtime, its fail-closed Tool boundary, and deterministic reviewed Policy;
+they add no real server capability.
 
 Completed Approval Gate conformance means that every Policy-allowed Plan enters
 `WAITING_FOR_APPROVAL`, an audited `NOT_REQUIRED` decision exits immediately,
@@ -66,6 +66,9 @@ Runtime
 - Runtime is the only application-level entry point.
 - Planner never invokes a Tool or transport.
 - Policy never invokes an LLM and never trusts model-provided risk.
+- Policy receives one frozen Tool Registry and uses only its read-only Metadata
+  view plus shared canonical-hashing integrity helpers. It never registers,
+  freezes, resolves a handler, or invokes a Tool.
 - Executor never plans or changes approved arguments.
 - Context Builder and Verifier never invoke a Tool. Runtime sends their
   evidence requests through Policy and Executor.
@@ -87,6 +90,21 @@ Runtime
 
 The Tool Gateway only registers, resolves, and validates Tools. It never
 performs Policy, Approval, planning, or verification.
+
+Phase 3 Policy configuration is one package-resident, versioned, strict JSON
+Policy Profile plus a separate human review record. Startup validates the
+Profile Schema, its RFC 8785 canonical SHA-256 hash, and the review binding
+before constructing Runtime. Policy configuration has no environment
+override, wildcard, hot reload, executable expression, or dynamic language.
+Changing Profile content invalidates the old review and requires an
+independently reviewed record for the new hash.
+
+L1 is fail-closed: absence of an exact capability rule is `DENY`; a matching
+rule explicitly selects `NOT_REQUIRED` or `HUMAN_PLAN_APPROVAL`. Phase 3 always
+denies resolved L3 Steps. An L3 Step that passes identity, integrity, and target
+scope checks uses `l3_confirmation_unavailable`; earlier validation failures
+retain their specific reason. Only Phase 4 may revise the fixed L3 denial,
+after single-use per-invocation confirmation is implemented and tested.
 
 Diagnosis is the Planner's evidence-linked explanation and `reason` output, not
 a separate component or state. Review and Commit are Approval events represented
@@ -641,6 +659,9 @@ operation.
 
 ## Phase 3 — Policy Engine
 
+Status: Implemented (2026-07-29); the active reviewed Profile grants only
+`local-user → local-mock → get_system_status@1.0.0`
+
 ### Goal
 
 Make all permission, allowlist, risk, and approval-requirement decisions
@@ -649,14 +670,16 @@ deterministic and independent of model reasoning.
 ### Inputs
 
 - A validated ExecutionPlan.
-- The immutable Tool Metadata catalog.
+- One frozen Tool Registry, exposed to Policy only through its immutable
+  Metadata snapshot.
 - A typed local operator context and target reference.
-- Static policy configuration loaded and validated at startup.
+- A package-resident, versioned Policy Profile and independent review record,
+  both loaded and validated once at startup.
 
 ### Outputs
 
 - A PolicyDecision for the plan and each step.
-- Stable `decision: ALLOW | DENY`, reason codes, and a separate
+- Stable `effect: ALLOW | DENY`, reason codes, and a separate
   `approval_requirement: NOT_REQUIRED | HUMAN_PLAN_APPROVAL`.
 - For each L3 Step, a separate
   `manual_confirmation_requirement: PER_INVOCATION`; it is not a third
@@ -666,41 +689,73 @@ deterministic and independent of model reasoning.
 
 - A fail-closed Policy Engine.
 - A fixed risk matrix:
-  - L0: automatic when Tool and target are allowed.
-  - L1: allowed or denied by explicit read policy.
+  - L0: automatic only when an exact capability rule allows the operator,
+    target, Tool identity, Version, Contract Hash, and Implementation Hash; a
+    rule may raise the requirement to human plan approval.
+  - L1: a missing exact rule is denied; a matching rule explicitly selects
+    `NOT_REQUIRED` or `HUMAN_PLAN_APPROVAL`.
   - L2: allowed only with exact-plan approval.
-  - L3: allowed only with exact-plan approval and a per-invocation Manual
-    Confirmation.
-- Target and Tool allowlists.
+  - L3: every resolved Step is denied throughout Phase 3. A Step that passes
+    identity, integrity, and target-scope checks uses
+    `l3_confirmation_unavailable`; earlier validation failures retain their
+    specific reason. The decision reports that exact-plan approval and a
+    per-invocation Manual Confirmation would be required, but those fields
+    never override `DENY`.
+- Exact operator, target, Tool identity, Version, Contract Hash, and
+  Implementation Hash capability rules, without wildcards.
 - Validation that plan references match registered Tool Metadata.
+- A strict JSON Policy Profile with a stable Profile ID and Version, and a
+  separate review record binding its RFC 8785 canonical SHA-256 content hash,
+  review status, the fixed single-user reviewer `local-owner`, and a
+  timezone-aware UTC review timestamp.
 
 ### Acceptance Criteria
 
 - Policy has no LLM or model adapter dependency.
-- Tool risk is read from the registry, never accepted from model output.
+- Policy imports no Tool subsystem module except `ai_server.tools.registry` for
+  read-only frozen Metadata access and `ai_server.tools.hashing` for integrity
+  checks. It has no Gateway, Executor, Planner, Approval, Memory, network,
+  Shell, or filesystem-write dependency.
+- Tool risk is read from the frozen Registry, never accepted from model output
+  or independently supplied caller Metadata.
 - Resolved step risk is read-only, and plan risk is the highest resolved step
   risk.
-- L1 requires an explicit allow rule; a missing rule denies rather than
-  upgrading or guessing.
-- Any unknown Tool, Tool version, target, risk, or policy field produces deny.
+- L1 requires an exact rule; a missing rule denies rather than upgrading or
+  guessing. An exact rule can choose only `NOT_REQUIRED` or
+  `HUMAN_PLAN_APPROVAL`.
+- Any unknown Tool, Tool version, operator, target, risk, policy field, or
+  capability binding produces deny.
 - A plan containing one denied step is denied as a whole.
-- A plan containing any L2/L3 step cannot reach Executor without the required
-  approval mode.
+- A plan containing an L2 step cannot reach Executor without human plan
+  approval. A plan containing an L3 step cannot reach Executor in Phase 3,
+  regardless of profile content or approval data.
+- Malformed Policy Profile or review JSON, an invalid content hash, an
+  unapproved review status, or a mismatched review binding prevents Runtime
+  construction. Profile content is immutable for that process lifetime.
+- Policy Profile changes cannot take effect through hot reload, environment
+  override, a dynamic policy language, or user-defined executable rules.
 - The same inputs always produce the same PolicyDecision.
 
 ### Test Requirements
 
-- A complete L0–L3 decision table.
+- A complete L0–L3 decision table, including L1 missing-rule denial, both
+  explicit L1 approval modes, and the fixed Phase 3 L3 denial.
 - Tests for mixed-risk plans, unknown metadata, target denial, Tool denial,
-  plan risk forgery, and malformed policy.
+  operator denial, exact capability mismatches, plan risk forgery, malformed
+  Profile and review JSON, review/hash drift, and unknown policy fields.
 - Determinism tests repeat identical decisions.
-- Negative tests confirm no model adapter is imported or invoked.
+- Negative architecture tests confirm Policy cannot import a model adapter,
+  Gateway, Executor, Planner, Approval, Memory, transport, Shell, or
+  filesystem-write capability, and cannot mutate or resolve a handler from the
+  Tool Registry.
 - Policy tests exist for every Tool added in later phases.
 
 ### Out of Scope
 
-Approval issuance, Tool invocation, user-defined policy code, model-based risk
-classification, RBAC, multi-user identity, and remote policy services.
+Approval issuance or persistence, L3 confirmation, Tool invocation, hot
+reload, environment overrides, wildcard rules, user-defined or executable
+policy code, dynamic policy languages, model-based risk classification, RBAC,
+multi-user identity, and remote policy services.
 
 ## Phase 4 — Approval
 

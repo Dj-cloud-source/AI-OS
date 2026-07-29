@@ -8,11 +8,14 @@ from ai_server.models.system_status import ServiceStatus, SystemStatus
 from ai_server.models.task import Task
 from ai_server.models.tool import (
     RiskLevel,
+    SideEffectKind,
     TargetReference,
     ToolError,
     ToolErrorCategory,
     ToolMetadata,
     ToolResult,
+    ToolSideEffects,
+    ToolTargetScope,
 )
 from ai_server.planner.service import SUPPORTED_REQUEST, Planner
 from ai_server.runtime.errors import VerificationError
@@ -29,6 +32,16 @@ def make_success() -> tuple[ExecutionPlan, ToolResult[SystemStatus]]:
         implementation_hash="b" * 64,
         description="Return deterministic simulated system status.",
         risk_level=RiskLevel.L0,
+        side_effects=ToolSideEffects(
+            mutates_remote_state=False,
+            kind=SideEffectKind.NONE,
+        ),
+        target_scope=ToolTargetScope(
+            resource_type="local_system",
+            maximum_targets=1,
+            selector_field="target",
+            allow_dynamic_expansion=False,
+        ),
         timeout_ms=1000,
         idempotent=True,
         input_schema_id="urn:ai-server:tool:get-system-status:input-v1",

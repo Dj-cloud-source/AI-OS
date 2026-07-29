@@ -1,6 +1,6 @@
 # AIOps Agent Runtime Roadmap
 
-Status: Phases 0–2 and Approval Gate conformance implemented; Phases 3–11
+Status: Phases 0–3 and Approval Gate conformance implemented; Phases 4–11
 planned
 
 This roadmap defines the implementation order for the local-first AIOps Agent
@@ -8,10 +8,11 @@ Runtime. It is subordinate to `docs/VISION.md`, `docs/PHILOSOPHY.md`,
 `docs/ARCHITECTURE.md`, `docs/STATE_MACHINE.md`, `docs/TOOL_SPEC.md`, and
 `AGENTS.md`.
 
-Phases 0–2 contain only the approved local Mock Runtime and its fail-closed
-lifecycle. Phase 2 is local, artifact-driven, Mock-only, and has passed its
-registration and build gates. No SSH, model, database, container, shell,
-network, or real server capability is enabled by the current implementation.
+Phases 0–3 contain only the approved local Mock Runtime and its fail-closed
+lifecycle. Phase 2 is local, artifact-driven, Mock-only, and Phase 3 adds only
+the reviewed deterministic Policy boundary. Both have passed their release
+gates. No SSH, model, database, container, shell, network, or real server
+capability is enabled by the current implementation.
 
 Approval Gate conformance means that every Policy-allowed Plan passes through
 `WAITING_FOR_APPROVAL`, `NOT_REQUIRED` is recorded, human-approval-required
@@ -53,6 +54,17 @@ implemented.
 - Planner may select a Tool and arguments, but any resolved step risk is a
   read-only value derived by Runtime from Tool Metadata. Plan risk is the
   highest resolved step risk.
+- Phase 3 Policy configuration is a package-resident, versioned, strict JSON
+  artifact. Its RFC 8785 canonical SHA-256 hash is bound by a separate human
+  review record and validated once at startup; hot reload and policy DSLs are
+  not permitted.
+- L1 is fail-closed: an exact missing rule is `DENY`; an exact matching rule
+  may resolve to `NOT_REQUIRED` or `HUMAN_PLAN_APPROVAL`.
+- Until Phase 4 implements and tests single-use per-invocation confirmation,
+  every resolved L3 Step is denied. An L3 Step whose identity, integrity, and
+  target-scope checks pass uses `l3_confirmation_unavailable`; an earlier
+  identity, integrity, or scope failure retains its more specific stable denial
+  reason. Neither a model nor policy configuration can relax this gate.
 
 ## Cross-phase failure rules
 
@@ -271,6 +283,9 @@ arbitrary Shell, automatic retry, production registration, and mutating Tools.
 
 ## Phase 3 — Policy Engine
 
+Status: Implemented (2026-07-29); the active reviewed Profile grants only
+`local-user → local-mock → get_system_status@1.0.0`
+
 ### Goal
 
 Implement deterministic permission, allowlist, risk, and approval-requirement
@@ -278,8 +293,8 @@ decisions.
 
 ### Inputs
 
-An ExecutionPlan, Tool Metadata catalog, target identity, and local operator
-context.
+An ExecutionPlan, a frozen Tool Registry, target identity, local operator
+context, and a package-resident reviewed Policy Profile.
 
 ### Outputs
 
@@ -287,24 +302,49 @@ A structured, explainable PolicyDecision for every plan and step.
 
 ### Deliverables
 
-The Policy Engine, allowlist rules, L0–L3 decision matrix, denial reasons, and
-fail-closed defaults.
+The Policy Engine, exact capability rules, a versioned strict-JSON Policy
+Profile, a separate review record, the L0–L3 decision matrix, stable denial
+reasons, and fail-closed defaults. The profile is hashed using SHA-256 over its
+UTF-8 RFC 8785 canonical JSON representation. Its review record binds the
+exact profile identity, version, content hash, review status, reviewer, and UTC
+review timestamp. The single-user MVP accepts only the local reviewer identity
+`local-owner`.
 
 ### Acceptance Criteria
 
-Policy never calls an LLM. L0 is automatic, L1 is policy-controlled, L2
-requires approval, and L3 requires approval plus a per-invocation Manual
-Confirmation. Missing metadata, an unknown Tool, a missing L1 rule, or a
-disallowed target is denied. Plan risk is the highest resolved step risk.
+Policy never calls an LLM, invokes a Tool, mutates the Registry, or reads Tool
+risk from a Plan. It may use only the frozen Tool Registry's read-only
+metadata view and the shared canonical-hashing integrity helpers. L0 is
+automatic only when an exact capability rule allows it. L1 has no implicit
+allow: a missing exact rule is denied, while a matching rule explicitly chooses
+`NOT_REQUIRED` or `HUMAN_PLAN_APPROVAL`. L2 requires human plan approval.
+During Phase 3 every resolved L3 Step is denied. A structurally valid L3 Step
+whose identity, integrity, and target scope pass uses
+`l3_confirmation_unavailable`, while its decision still reports
+`HUMAN_PLAN_APPROVAL` and `PER_INVOCATION`; earlier validation failures retain
+their specific stable reason codes. Missing or malformed
+metadata, an unknown Tool, an unreviewed or hash-mismatched Policy Profile, an
+unknown policy field, or a disallowed operator, target, or Tool is denied or
+prevents Runtime startup as appropriate. Plan risk is the highest resolved
+step risk.
+
+The Policy Profile is loaded and validated once at startup. It has no
+environment override, wildcard rule, executable expression, user-defined code,
+dynamic policy language, or hot-update path. A changed profile has a new hash
+and requires a new independent review record before Runtime can use it.
 
 ### Test Requirements
 
-An exhaustive risk matrix covers allow, deny, approval-required, metadata
-tampering, unknown Tools, disallowed targets, and deterministic repeatability.
+An exhaustive risk matrix covers L0 allow, L1 default deny, both explicit L1
+approval modes, L2 approval, the Phase 3 L3 hard denial, metadata and profile
+tampering, unknown Tools, disallowed operators and targets, unreviewed profiles,
+Registry mutation attempts, forbidden dependency imports, and deterministic
+repeatability.
 
 ### Out of Scope
 
-Approval records, Tool execution, dynamic policy languages, RBAC, multi-user,
+Approval issuance or persistence, L3 confirmation, Tool execution, hot policy
+reload, dynamic policy languages, user-authored policy code, RBAC, multi-user,
 and model-based risk classification.
 
 ## Phase 4 — Approval

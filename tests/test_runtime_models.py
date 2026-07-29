@@ -1,4 +1,3 @@
-from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta, tzinfo
 from uuid import uuid4
 
@@ -6,6 +5,11 @@ import pytest
 from pydantic import ValidationError
 
 from ai_server.models.execution import ExecutionPlan
+from ai_server.models.policy import (
+    PolicyApprovalRequirement,
+    PolicyDecision,
+    PolicyEvaluationContext,
+)
 from ai_server.models.runtime import (
     LifecycleEvent,
     LifecycleEventKind,
@@ -15,12 +19,10 @@ from ai_server.models.runtime import (
     RuntimeOutcomeStatus,
 )
 from ai_server.models.task import Task
-from ai_server.models.tool import ToolMetadata
 from ai_server.planner.service import SUPPORTED_REQUEST
-from ai_server.policy.engine import PolicyEngine, ToolKey
 from ai_server.runtime.engine import RuntimeEngine
-from ai_server.runtime.errors import ApprovalRequiredError
 from ai_server.runtime.state import RuntimeState
+from ai_server.tools.bootstrap import build_default_registry
 
 
 def assign_attribute(instance: object, name: str, value: object) -> None:
@@ -33,16 +35,30 @@ def completed_outcome() -> RuntimeOutcome:
 
 
 def waiting_outcome() -> RuntimeOutcome:
-    class ApprovalPolicy(PolicyEngine):
-        def check(
-            self,
-            plan: ExecutionPlan,
-            catalog: Mapping[ToolKey, ToolMetadata],
-        ) -> None:
-            del plan, catalog
-            raise ApprovalRequiredError("approval required")
+    registry = build_default_registry()
+    runtime = RuntimeEngine(registry=registry)
+    trusted_evaluate = runtime._policy.evaluate
 
-    return RuntimeEngine(policy=ApprovalPolicy()).run(Task(request=SUPPORTED_REQUEST))
+    def approval_evaluate(
+        plan: ExecutionPlan,
+        context: PolicyEvaluationContext,
+    ) -> PolicyDecision:
+        decision = trusted_evaluate(plan, context)
+        steps = tuple(
+            step.model_copy(
+                update={"approval_requirement": (PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL)}
+            )
+            for step in decision.step_decisions
+        )
+        return decision.model_copy(
+            update={
+                "approval_requirement": (PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL),
+                "step_decisions": steps,
+            }
+        )
+
+    runtime._policy.evaluate = approval_evaluate  # type: ignore[method-assign]
+    return runtime.run(Task(request=SUPPORTED_REQUEST))
 
 
 def test_runtime_lifecycle_models_round_trip_and_are_frozen() -> None:
@@ -258,6 +274,42 @@ def test_plan_and_results_require_completed_producer_stages() -> None:
     premature_result["results"] = completed.model_dump(mode="python")["results"]
     with pytest.raises(ValidationError, match="Incomplete Executor results"):
         RuntimeOutcome.model_validate(premature_result)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing", "completed Policy stage requires"),
+        ("task_id", "Policy decision identity"),
+        ("plan_id", "Policy decision identity"),
+        ("operator_id", "Policy decision identity"),
+        ("target", "Policy decision identity"),
+        ("step_id", "ordered planned step"),
+        ("arguments_hash", "ordered planned step"),
+    ],
+)
+def test_runtime_outcome_requires_policy_decision_bound_to_task_and_plan(
+    mutation: str,
+    message: str,
+) -> None:
+    completed = completed_outcome()
+    payload = completed.model_dump(mode="python")
+
+    if mutation == "missing":
+        payload["policy_decision"] = None
+    elif mutation in {"task_id", "plan_id"}:
+        payload["policy_decision"][mutation] = uuid4()
+    elif mutation == "operator_id":
+        payload["policy_decision"]["operator_id"] = "other-user"
+    elif mutation == "target":
+        payload["policy_decision"]["target"]["target_id"] = "other-target"
+    elif mutation == "step_id":
+        payload["policy_decision"]["step_decisions"][0]["step_id"] = "other-step"
+    else:
+        payload["policy_decision"]["step_decisions"][0]["arguments_hash"] = "d" * 64
+
+    with pytest.raises(ValidationError, match=message):
+        RuntimeOutcome.model_validate(payload)
 
 
 @pytest.mark.parametrize("mutation", ["missing", "duplicate", "paused_too"])

@@ -263,6 +263,8 @@ def test_tool_contract_and_projection_are_strict_frozen_models() -> None:
         implementation_hash=OTHER_HASH,
         description=contract.description,
         risk_level=contract.risk_level,
+        side_effects=contract.side_effects,
+        target_scope=contract.target_scope,
         timeout_ms=contract.timeout_ms,
         idempotent=contract.idempotent,
         input_schema_id="urn:ai-server:tool:get_system_status:1.0.0:input",
@@ -275,6 +277,10 @@ def test_tool_contract_and_projection_are_strict_frozen_models() -> None:
     assert ToolMetadata.model_validate_json(metadata.model_dump_json()) == metadata
     with pytest.raises(ValidationError):
         metadata.timeout_ms = 2
+    with pytest.raises(ValidationError):
+        metadata.side_effects.kind = SideEffectKind.DELETION
+    with pytest.raises(ValidationError):
+        metadata.target_scope.maximum_targets = 2
     with pytest.raises(ValidationError):
         ToolMetadata.model_validate(
             {
@@ -289,6 +295,11 @@ def test_tool_contract_and_projection_are_strict_frozen_models() -> None:
                 "risk_override": "L3",
             }
         )
+    for required_projection in ("side_effects", "target_scope"):
+        incomplete = metadata.model_dump(mode="python")
+        incomplete.pop(required_projection)
+        with pytest.raises(ValidationError):
+            ToolMetadata.model_validate(incomplete)
 
 
 def test_contract_rejects_approval_and_retry_mismatches() -> None:

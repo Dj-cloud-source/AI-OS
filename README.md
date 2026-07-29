@@ -3,10 +3,10 @@
 A local-first, policy-controlled Runtime for safe and testable server
 operations.
 
-Phases 0–2 provide an installable Python foundation, a fail-closed Runtime
-lifecycle, and an artifact-driven Tool Protocol without connecting to a real
-server. The only registered Tool is the deterministic local
-`get_system_status@1.0.0` Mock.
+Phases 0–3 provide an installable Python foundation, a fail-closed Runtime
+lifecycle, an artifact-driven Tool Protocol, and a reviewed deterministic
+Policy Engine without connecting to a real server. The only registered and
+authorized Tool is the deterministic local `get_system_status@1.0.0` Mock.
 
 ## Current capabilities
 
@@ -17,6 +17,10 @@ server. The only registered Tool is the deterministic local
 - Five package-resident Tool Protocol JSON Schemas
 - Artifact-validated, immutable-after-startup Tool Registry
 - Exact-version, hash-bound Tool Gateway dispatch through Executor
+- Versioned strict-JSON Policy Profile with an independently hash-bound local
+  review record
+- Structured per-Step and aggregate Policy decisions with exact capability
+  matching and an L0–L3 fail-closed matrix
 - Deterministic L0 `get_system_status@1.0.0` payload-only Mock Tool
 - Explicit Planner, Policy, Executor, and Verifier boundaries
 - Immutable structured outcomes and ordered lifecycle events

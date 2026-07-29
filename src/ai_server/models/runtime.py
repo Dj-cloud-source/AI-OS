@@ -1,4 +1,4 @@
-"""Immutable Phase 1 Runtime lifecycle contracts."""
+"""Immutable Runtime lifecycle contracts."""
 
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -8,15 +8,20 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ai_server.models.execution import ExecutionPlan
+from ai_server.models.policy import (
+    PolicyApprovalRequirement,
+    PolicyDecision,
+    PolicyEffect,
+)
 from ai_server.models.system_status import SystemStatus
 from ai_server.models.task import Task
-from ai_server.models.tool import TargetReference, ToolResult
+from ai_server.models.tool import RiskLevel, TargetReference, ToolResult
 from ai_server.runtime.state import RuntimeState, RuntimeStateMachine
 from ai_server.tools.hashing import canonical_json_sha256
 
 
 class RuntimeOutcomeStatus(StrEnum):
-    """Public outcomes that Phase 1 Runtime calls may return."""
+    """Public outcomes that current Runtime calls may return."""
 
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
@@ -175,13 +180,14 @@ class RuntimeFailure(BaseModel):
 
 
 class RuntimeOutcome(BaseModel):
-    """The immutable structured result of one Phase 1 Runtime invocation."""
+    """The immutable structured result of one governed Runtime invocation."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     status: RuntimeOutcomeStatus
     task: Task
     plan: ExecutionPlan | None = None
+    policy_decision: PolicyDecision | None = None
     results: tuple[ToolResult[SystemStatus], ...] = ()
     events: tuple[LifecycleEvent, ...] = Field(min_length=1)
     failure: RuntimeFailure | None = None
@@ -191,6 +197,7 @@ class RuntimeOutcome(BaseModel):
         """Require outcome, Task, plan, results, and events to tell one story."""
         self._validate_events()
         self._validate_plan_and_results()
+        self._validate_policy_decision()
         self._validate_terminal_shape()
         return self
 
@@ -329,6 +336,93 @@ class RuntimeOutcome(BaseModel):
                 or result.target != expected_target
             ):
                 raise ValueError("execution result identity must match its planned step")
+
+    def _validate_policy_decision(self) -> None:
+        completed_components = {
+            event.component
+            for event in self.events
+            if event.kind is LifecycleEventKind.COMPONENT_COMPLETED
+        }
+        policy_completed = RuntimeComponent.POLICY in completed_components
+        decision = self.policy_decision
+        if decision is None:
+            if (
+                policy_completed
+                or RuntimeState.WAITING_FOR_APPROVAL in self.task.state_history
+                or RuntimeState.EXECUTING in self.task.state_history
+                or RuntimeState.VERIFYING in self.task.state_history
+                or self.task.state is RuntimeState.COMPLETED
+            ):
+                raise ValueError("a completed Policy stage requires its structured decision")
+            return
+        if self.plan is None or RuntimeState.POLICY_CHECK not in self.task.state_history:
+            raise ValueError("a Policy decision requires a plan evaluated in POLICY_CHECK")
+        expected_target = TargetReference(
+            target_id=self.plan.target,
+            resource_type="local_system",
+            resource_id=self.plan.target,
+        )
+        if (
+            decision.task_id != self.task.task_id
+            or decision.plan_id != self.plan.plan_id
+            or decision.operator_id != self.task.user
+            or decision.target != expected_target
+            or len(decision.step_decisions) != len(self.plan.steps)
+        ):
+            raise ValueError("Policy decision identity must match the Task and Plan")
+        for step, step_decision in zip(
+            self.plan.steps,
+            decision.step_decisions,
+            strict=True,
+        ):
+            if (
+                step_decision.step_id != step.step_id
+                or step_decision.tool_id != step.tool_id
+                or step_decision.tool_version != step.tool_version
+                or step_decision.contract_hash != step.contract_hash
+                or step_decision.implementation_hash != step.implementation_hash
+                or step_decision.arguments_hash != canonical_json_sha256(step.arguments)
+            ):
+                raise ValueError("Policy step decision must match its ordered planned step")
+        if any(
+            step.resolved_risk is RiskLevel.L3 and step.effect is PolicyEffect.ALLOW
+            for step in decision.step_decisions
+        ):
+            raise ValueError("Phase 3 cannot allow an L3 Tool")
+        if decision.effect is PolicyEffect.DENY:
+            normal_denial = (
+                self.status is RuntimeOutcomeStatus.FAILED
+                and self.failure is not None
+                and self.failure.component is RuntimeComponent.POLICY
+                and self.failure.code == "policy_denied"
+                and self.task.state_history[-2] is RuntimeState.POLICY_CHECK
+            )
+            clock_failure = (
+                self.status is RuntimeOutcomeStatus.FAILED
+                and self.failure is not None
+                and self.failure.component is RuntimeComponent.RUNTIME
+                and self.failure.code == "invalid_clock"
+                and self.task.state_history[-2] is RuntimeState.POLICY_CHECK
+            )
+            if not normal_denial and not clock_failure:
+                raise ValueError("a denied Policy decision must fail before approval or execution")
+            return
+        if not policy_completed and not (
+            self.status is RuntimeOutcomeStatus.FAILED
+            and self.failure is not None
+            and self.failure.code == "invalid_clock"
+            and self.task.state_history[-2] is RuntimeState.POLICY_CHECK
+        ):
+            raise ValueError("an allowed Policy decision requires a completed Policy stage")
+        if decision.approval_requirement is PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL:
+            if (
+                RuntimeState.EXECUTING in self.task.state_history
+                or RuntimeState.VERIFYING in self.task.state_history
+                or self.task.state is RuntimeState.COMPLETED
+            ):
+                raise ValueError("human approval-required work cannot execute in Phase 3")
+        elif self.status is RuntimeOutcomeStatus.WAITING_FOR_APPROVAL:
+            raise ValueError("NOT_REQUIRED Policy decisions cannot remain approval-paused")
 
     def _validate_terminal_shape(self) -> None:
         final_event = self.events[-1]

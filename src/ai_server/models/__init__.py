@@ -2,6 +2,18 @@
 
 from ai_server.models.context import RuntimeContext
 from ai_server.models.execution import ExecutionPlan, ExecutionStep, StepRole
+from ai_server.models.policy import (
+    ManualConfirmationRequirement,
+    PolicyApprovalRequirement,
+    PolicyCapabilityRule,
+    PolicyDecision,
+    PolicyEffect,
+    PolicyEvaluationContext,
+    PolicyProfile,
+    PolicyReasonCode,
+    PolicyReviewRecord,
+    StepPolicyDecision,
+)
 from ai_server.models.runtime import (
     LifecycleEvent,
     LifecycleEventKind,
@@ -35,6 +47,15 @@ __all__ = [
     "GetSystemStatusArguments",
     "LifecycleEvent",
     "LifecycleEventKind",
+    "ManualConfirmationRequirement",
+    "PolicyApprovalRequirement",
+    "PolicyCapabilityRule",
+    "PolicyDecision",
+    "PolicyEffect",
+    "PolicyEvaluationContext",
+    "PolicyProfile",
+    "PolicyReasonCode",
+    "PolicyReviewRecord",
     "RiskLevel",
     "RuntimeComponent",
     "RuntimeContext",
@@ -43,6 +64,7 @@ __all__ = [
     "RuntimeOutcomeStatus",
     "ServiceStatus",
     "StepRole",
+    "StepPolicyDecision",
     "Task",
     "TargetReference",
     "ToolCall",

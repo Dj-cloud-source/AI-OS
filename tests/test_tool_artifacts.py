@@ -152,6 +152,8 @@ def test_load_tool_artifacts_accepts_the_real_reviewed_bundle() -> None:
     assert artifacts.contract.version == TOOL_VERSION
     assert artifacts.contract_hash == artifacts.record.contract_hash
     assert artifacts.implementation_hash == artifacts.record.implementation_hash
+    assert artifacts.metadata.side_effects == artifacts.contract.side_effects
+    assert artifacts.metadata.target_scope == artifacts.contract.target_scope
     assert artifacts.handler_entry_point == HANDLER_ENTRY_POINT
     assert artifacts.input_model_entry_point == INPUT_MODEL_ENTRY_POINT
     assert artifacts.output_model_entry_point == OUTPUT_MODEL_ENTRY_POINT

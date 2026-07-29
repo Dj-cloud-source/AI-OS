@@ -1,3 +1,4 @@
+from ai_server.policy.errors import PolicyConfigurationError
 from ai_server.runtime.errors import (
     AiServerError,
     ApprovalRequiredError,
@@ -8,6 +9,7 @@ from ai_server.runtime.errors import (
     InvalidTaskError,
     PlanMismatchError,
     PolicyDeniedError,
+    PolicyEvaluationError,
     ReservedStateTransitionError,
     TerminalStateMutationError,
     ToolExecutionError,
@@ -29,7 +31,9 @@ def test_domain_error_codes_are_stable_and_unique() -> None:
         ReservedStateTransitionError: "reserved_state_transition",
         UnsupportedTaskError: "unsupported_task",
         PlanMismatchError: "plan_mismatch",
+        PolicyConfigurationError: "policy_configuration_error",
         PolicyDeniedError: "policy_denied",
+        PolicyEvaluationError: "policy_evaluation_failed",
         ToolExecutionError: "tool_execution",
         VerificationError: "verification",
     }

@@ -346,7 +346,7 @@ ExecutionStep
 
 Reason
 
-Tool risk copied from authoritative Tool metadata
+Exact Tool identity, Version, Contract Hash, and Implementation Hash
 
 Verification
 
@@ -354,7 +354,9 @@ Rollback
 
 Planner never produces shell scripts.
 
-Planner must never infer, lower, or override a Tool risk level.
+Planner does not place Tool risk in an ExecutionPlan. Policy resolves risk from
+the exact frozen Registry Metadata after planning. Planner must never infer,
+copy, lower, or override a Tool risk level.
 
 ---
 
