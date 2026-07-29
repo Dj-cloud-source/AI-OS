@@ -65,7 +65,13 @@ FORBIDDEN_PACKAGE_IMPORTS = {
         "ai_server.planner",
         "ai_server.policy",
     },
-    "verifier": {"ai_server.executor", "ai_server.tools"},
+    "verifier": {
+        "ai_server.executor",
+        "ai_server.tools.bootstrap",
+        "ai_server.tools.gateway",
+        "ai_server.tools.get_system_status",
+        "ai_server.tools.registry",
+    },
 }
 
 POLICY_MODEL_ADAPTER_PREFIXES = {
@@ -79,7 +85,9 @@ POLICY_MODEL_ADAPTER_PREFIXES = {
 }
 
 CONCRETE_CAPABILITY_MODULE = "ai_server.tools.get_system_status"
-CONCRETE_CAPABILITY_NAME = "get_system_status"
+CONCRETE_CAPABILITY_NAME = "GetSystemStatusTool"
+CONCRETE_CAPABILITY_OWNER = Path("tools/bootstrap.py")
+TOOL_GATEWAY_INVOKE_OWNER = Path("executor/service.py")
 TASK_STATE_FIELDS = frozenset({"state", "state_history"})
 TASK_STATE_OWNER = Path("runtime/engine.py")
 
@@ -414,15 +422,14 @@ def test_architecture_boundaries_have_no_forbidden_imports() -> None:
     assert not violations
 
 
-def test_executor_is_only_production_caller_of_mock_tool() -> None:
+def test_bootstrap_is_only_production_importer_of_mock_tool() -> None:
     capability_importers = sorted(
         path.relative_to(SRC_ROOT)
         for path in SRC_ROOT.rglob("*.py")
         if imports_concrete_capability(path)
     )
 
-    assert capability_importers
-    assert all(path.parts[0] == "executor" for path in capability_importers)
+    assert capability_importers == [CONCRETE_CAPABILITY_OWNER]
 
 
 def test_runtime_engine_is_only_production_importer_of_executor() -> None:
@@ -435,6 +442,21 @@ def test_runtime_engine_is_only_production_importer_of_executor() -> None:
     ]
 
     assert not violations
+
+
+def test_executor_is_only_production_tool_gateway_invoker() -> None:
+    invokers = sorted(
+        path.relative_to(SRC_ROOT)
+        for path in SRC_ROOT.rglob("*.py")
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "invoke"
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        )
+    )
+
+    assert invokers == [TOOL_GATEWAY_INVOKE_OWNER]
 
 
 def test_runtime_engine_is_only_task_state_owner() -> None:

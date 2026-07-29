@@ -19,9 +19,15 @@ from ai_server.models.runtime import (
     RuntimeOutcome,
     RuntimeOutcomeStatus,
 )
-from ai_server.models.system_status import GetSystemStatusArguments, SystemStatus
+from ai_server.models.system_status import SystemStatus
 from ai_server.models.task import Task
-from ai_server.models.tool import RiskLevel, ToolMetadata, ToolResult
+from ai_server.models.tool import (
+    TargetReference,
+    ToolError,
+    ToolErrorCategory,
+    ToolMetadata,
+    ToolResult,
+)
 from ai_server.planner.service import SUPPORTED_REQUEST, Planner
 from ai_server.policy.engine import PolicyEngine, ToolKey
 from ai_server.runtime.engine import RuntimeEngine
@@ -40,7 +46,10 @@ from ai_server.runtime.errors import (
     VerificationError,
 )
 from ai_server.runtime.state import RuntimeState
-from ai_server.tools.get_system_status import GET_SYSTEM_STATUS_METADATA, get_system_status
+from ai_server.tools.bootstrap import build_default_registry
+from ai_server.tools.gateway import ToolGateway
+from ai_server.tools.hashing import canonical_json_sha256
+from ai_server.tools.registry import ToolRegistry
 from ai_server.verifier.service import Verifier
 
 SENSITIVE_MARKER = "SENSITIVE_RUNTIME_MARKER"
@@ -94,19 +103,13 @@ class RecordingPolicy(PolicyEngine):
 
 
 class RecordingExecutor(Executor):
-    def __init__(self, trace: Trace) -> None:
+    def __init__(self, trace: Trace, gateway: ToolGateway) -> None:
         self._trace = trace
-        super().__init__(system_status_tool=self._tool)
-
-    def _tool(
-        self,
-        arguments: GetSystemStatusArguments,
-    ) -> ToolResult[SystemStatus]:
-        self._trace.record("tool")
-        return get_system_status(arguments)
+        super().__init__(gateway)
 
     def execute(self, plan: ExecutionPlan) -> tuple[ToolResult[SystemStatus], ...]:
         self._trace.record("executor")
+        self._trace.record("tool")
         return super().execute(plan)
 
 
@@ -167,15 +170,69 @@ def make_runtime(
     trace: Trace,
     *,
     clock: SequenceClock | None = None,
+    executor: Executor | None = None,
 ) -> RuntimeEngine:
+    registry = build_default_registry()
     return RuntimeEngine(
         context_builder=RecordingContextBuilder(trace),
         planner=RecordingPlanner(trace),
         policy=RecordingPolicy(trace),
-        executor=RecordingExecutor(trace),
+        executor=(
+            executor
+            if executor is not None
+            else RecordingExecutor(
+                trace,
+                ToolGateway(registry, clock=lambda: 0),
+            )
+        ),
         verifier=RecordingVerifier(trace),
-        tool_metadata=GET_SYSTEM_STATUS_METADATA,
+        registry=registry,
         clock=clock if clock is not None else lambda: datetime.now(UTC),
+    )
+
+
+def make_structured_result(
+    plan: ExecutionPlan,
+    *,
+    success: bool,
+) -> ToolResult[SystemStatus]:
+    """Build exact success or failure evidence for Runtime boundary tests."""
+    step = plan.steps[0]
+    return ToolResult[SystemStatus](
+        invocation_id=UUID("00000000-0000-4000-8000-000000000001"),
+        plan_step_id=step.step_id,
+        tool_id=step.tool_id,
+        tool_version=step.tool_version,
+        contract_hash=step.contract_hash,
+        arguments_hash=canonical_json_sha256(step.arguments),
+        target=TargetReference(
+            target_id=plan.target,
+            resource_type="local_system",
+            resource_id=step.arguments.target,
+        ),
+        success=success,
+        data=(
+            SystemStatus(
+                cpu_percent=12.5,
+                memory_percent=34.0,
+                disk_percent=45.5,
+                services=(),
+            )
+            if success
+            else None
+        ),
+        evidence={"source": "mock"} if success else {},
+        error=(
+            None
+            if success
+            else ToolError(
+                code="tool_execution_failed",
+                category=ToolErrorCategory.EXECUTION,
+                message="Tool execution failed safely",
+                retryable=False,
+            )
+        ),
+        duration_ms=0,
     )
 
 
@@ -417,8 +474,6 @@ def test_exception_instance_cannot_override_stable_failure_code(
 
 
 def test_non_none_policy_return_fails_closed_before_tool() -> None:
-    tool_calls = 0
-
     class InvalidReturnPolicy(PolicyEngine):
         def check(
             self,
@@ -428,22 +483,26 @@ def test_non_none_policy_return_fails_closed_before_tool() -> None:
             del plan, catalog
             return False  # type: ignore[return-value]
 
-    def counting_tool(
-        arguments: GetSystemStatusArguments,
-    ) -> ToolResult[SystemStatus]:
-        nonlocal tool_calls
-        tool_calls += 1
-        return get_system_status(arguments)
+    class CountingExecutor(Executor):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def execute(self, plan: ExecutionPlan) -> tuple[ToolResult[SystemStatus], ...]:
+            del plan
+            self.calls += 1
+            return ()
+
+    executor = CountingExecutor()
 
     outcome = RuntimeEngine(
         policy=InvalidReturnPolicy(),
-        executor=Executor(system_status_tool=counting_tool),
+        executor=executor,
     ).run(Task(request=SUPPORTED_REQUEST))
 
     assert outcome.status is RuntimeOutcomeStatus.FAILED
     assert outcome.failure is not None
     assert outcome.failure.code == "policy_denied"
-    assert tool_calls == 0
+    assert executor.calls == 0
 
 
 def test_falsey_injected_policy_is_not_replaced_by_default() -> None:
@@ -497,6 +556,9 @@ def test_executor_tuple_subclass_cannot_escape_through_magic_methods() -> None:
             raise SystemExit(SENSITIVE_MARKER)
 
     class UntrustedExecutor(Executor):
+        def __init__(self) -> None:
+            pass
+
         def execute(self, plan: ExecutionPlan) -> tuple[ToolResult[SystemStatus], ...]:
             del plan
             return cast(tuple[ToolResult[SystemStatus], ...], ExitingResults())
@@ -508,6 +570,77 @@ def test_executor_tuple_subclass_cannot_escape_through_magic_methods() -> None:
     assert outcome.failure.code == "tool_execution"
     assert outcome.failure.component is RuntimeComponent.EXECUTOR
     assert SENSITIVE_MARKER not in outcome.model_dump_json()
+
+
+def test_structured_tool_failure_stops_before_verifier_and_is_preserved() -> None:
+    trace = Trace()
+
+    class StructuredFailureExecutor(Executor):
+        def __init__(self) -> None:
+            pass
+
+        def execute(self, plan: ExecutionPlan) -> tuple[ToolResult[SystemStatus], ...]:
+            trace.record("executor")
+            trace.record("tool")
+            return (make_structured_result(plan, success=False),)
+
+    outcome = make_runtime(trace, executor=StructuredFailureExecutor()).run(
+        Task(request=SUPPORTED_REQUEST)
+    )
+
+    assert outcome.status is RuntimeOutcomeStatus.FAILED
+    assert outcome.failure is not None
+    assert outcome.failure.component is RuntimeComponent.EXECUTOR
+    assert outcome.failure.code == "tool_execution"
+    assert len(outcome.results) == 1
+    assert outcome.results[0].success is False
+    assert outcome.results[0].error is not None
+    assert outcome.results[0].error.code == "tool_execution_failed"
+    assert trace.calls == ["context", "planner", "policy", "executor", "tool"]
+    assert RuntimeState.VERIFYING not in outcome.task.state_history
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("arguments_hash", "d" * 64),
+        (
+            "target",
+            TargetReference(
+                target_id="local-mock",
+                resource_type="other_resource",
+                resource_id="local-mock",
+            ),
+        ),
+    ],
+)
+def test_runtime_rejects_executor_evidence_not_bound_to_plan(
+    field: str,
+    value: object,
+) -> None:
+    trace = Trace()
+
+    class MismatchedExecutor(Executor):
+        def __init__(self) -> None:
+            pass
+
+        def execute(self, plan: ExecutionPlan) -> tuple[ToolResult[SystemStatus], ...]:
+            trace.record("executor")
+            trace.record("tool")
+            result = make_structured_result(plan, success=True)
+            return (result.model_copy(update={field: value}),)
+
+    outcome = make_runtime(trace, executor=MismatchedExecutor()).run(
+        Task(request=SUPPORTED_REQUEST)
+    )
+
+    assert outcome.status is RuntimeOutcomeStatus.FAILED
+    assert outcome.failure is not None
+    assert outcome.failure.component is RuntimeComponent.EXECUTOR
+    assert outcome.failure.code == "tool_execution"
+    assert outcome.results == ()
+    assert trace.calls == ["context", "planner", "policy", "executor", "tool"]
+    assert RuntimeState.VERIFYING not in outcome.task.state_history
 
 
 @pytest.mark.parametrize("risk_label", ["L2", "L3"])
@@ -640,18 +773,17 @@ def test_l1_policy_denial_returns_failed_without_execution() -> None:
 
 
 def test_unsupported_task_and_malformed_plan_return_planner_failures() -> None:
-    tool_calls = 0
+    class CountingExecutor(Executor):
+        def __init__(self) -> None:
+            self.calls = 0
 
-    def counting_tool(
-        arguments: GetSystemStatusArguments,
-    ) -> ToolResult[SystemStatus]:
-        nonlocal tool_calls
-        tool_calls += 1
-        return get_system_status(arguments)
+        def execute(self, plan: ExecutionPlan) -> tuple[ToolResult[SystemStatus], ...]:
+            del plan
+            self.calls += 1
+            return ()
 
-    unsupported = RuntimeEngine(executor=Executor(system_status_tool=counting_tool)).run(
-        Task(request="unsupported")
-    )
+    executor = CountingExecutor()
+    unsupported = RuntimeEngine(executor=executor).run(Task(request="unsupported"))
 
     class EmptyPlanPlanner(Planner):
         def create_plan(
@@ -663,19 +795,18 @@ def test_unsupported_task_and_malformed_plan_return_planner_failures() -> None:
 
     malformed = RuntimeEngine(
         planner=EmptyPlanPlanner(),
-        executor=Executor(system_status_tool=counting_tool),
+        executor=executor,
     ).run(Task(request=SUPPORTED_REQUEST))
 
     assert unsupported.failure is not None
     assert unsupported.failure.code == "unsupported_task"
     assert malformed.failure is not None
     assert malformed.failure.code == "plan_mismatch"
-    assert tool_calls == 0
+    assert executor.calls == 0
 
 
 def test_phase_one_rejects_multistep_plan_before_policy_or_tool() -> None:
     policy_calls = 0
-    tool_calls = 0
 
     class MultiStepPlanner(Planner):
         def create_plan(
@@ -697,17 +828,20 @@ def test_phase_one_rejects_multistep_plan_before_policy_or_tool() -> None:
             policy_calls += 1
             return super().check(plan, catalog)
 
-    def counting_tool(
-        arguments: GetSystemStatusArguments,
-    ) -> ToolResult[SystemStatus]:
-        nonlocal tool_calls
-        tool_calls += 1
-        return get_system_status(arguments)
+    class CountingExecutor(Executor):
+        def __init__(self) -> None:
+            self.calls = 0
 
+        def execute(self, plan: ExecutionPlan) -> tuple[ToolResult[SystemStatus], ...]:
+            del plan
+            self.calls += 1
+            return ()
+
+    executor = CountingExecutor()
     outcome = RuntimeEngine(
         planner=MultiStepPlanner(),
         policy=CountingPolicy(),
-        executor=Executor(system_status_tool=counting_tool),
+        executor=executor,
     ).run(Task(request=SUPPORTED_REQUEST))
 
     assert outcome.status is RuntimeOutcomeStatus.FAILED
@@ -715,7 +849,7 @@ def test_phase_one_rejects_multistep_plan_before_policy_or_tool() -> None:
     assert outcome.failure.code == "plan_mismatch"
     assert outcome.plan is None
     assert policy_calls == 0
-    assert tool_calls == 0
+    assert executor.calls == 0
 
 
 def test_uuid_subclass_plan_fails_before_policy_or_tool_without_leaking(
@@ -732,13 +866,15 @@ def test_uuid_subclass_plan_fails_before_policy_or_tool_without_leaking(
 
     trace = Trace()
     caplog.set_level(logging.INFO)
+    registry = build_default_registry()
 
     outcome = RuntimeEngine(
         context_builder=RecordingContextBuilder(trace),
         planner=UntrustedIdentifierPlanner(),
         policy=RecordingPolicy(trace),
-        executor=RecordingExecutor(trace),
+        executor=RecordingExecutor(trace, ToolGateway(registry, clock=lambda: 0)),
         verifier=RecordingVerifier(trace),
+        registry=registry,
     ).run(Task(request=SUPPORTED_REQUEST))
 
     assert outcome.status is RuntimeOutcomeStatus.FAILED
@@ -750,8 +886,11 @@ def test_uuid_subclass_plan_fails_before_policy_or_tool_without_leaking(
     assert SENSITIVE_MARKER not in caplog.text
 
 
-@pytest.mark.parametrize("changed_field", ["tool_name", "reason"])
-def test_untrusted_planned_content_is_not_returned_or_logged(
+@pytest.mark.parametrize(
+    "changed_field",
+    ["tool_id", "contract_hash", "implementation_hash"],
+)
+def test_untrusted_planned_identity_is_not_returned_or_logged(
     changed_field: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -781,16 +920,17 @@ def test_runtime_rejects_invalid_input_before_recording_or_logging(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     forged_task = Task(request=SUPPORTED_REQUEST).model_copy(update={"user": SENSITIVE_MARKER})
-    forged_metadata = GET_SYSTEM_STATUS_METADATA.model_copy(update={"name": SENSITIVE_MARKER})
-    forged_risk = GET_SYSTEM_STATUS_METADATA.model_copy(update={"risk_level": RiskLevel.L3})
+    unsealed_registry = ToolRegistry()
+    empty_registry = ToolRegistry()
+    empty_registry.freeze()
     caplog.set_level(logging.INFO)
 
     with pytest.raises(InvalidTaskError):
         RuntimeEngine().run(forged_task)
     with pytest.raises(PolicyDeniedError):
-        RuntimeEngine(tool_metadata=forged_metadata)
+        RuntimeEngine(registry=unsealed_registry)
     with pytest.raises(PolicyDeniedError):
-        RuntimeEngine(tool_metadata=forged_risk)
+        RuntimeEngine(registry=empty_registry)
 
     assert SENSITIVE_MARKER not in caplog.text
 
@@ -1272,7 +1412,7 @@ def test_runtime_emits_structured_transition_and_execution_audit_logs(
 ) -> None:
     caplog.set_level(logging.INFO)
 
-    outcome = RuntimeEngine().run(Task(request=SUPPORTED_REQUEST))
+    outcome = make_runtime(Trace()).run(Task(request=SUPPORTED_REQUEST))
     messages = [json.loads(record.message) for record in caplog.records]
     transitions = [
         message for message in messages if message["event"] == "runtime_state_transition"
@@ -1285,7 +1425,7 @@ def test_runtime_emits_structured_transition_and_execution_audit_logs(
     assert audits == [
         {
             "approval_id": None,
-            "arguments": {"target": "local-mock"},
+            "arguments": {"redacted": True},
             "duration_ms": 0,
             "event": "execution_audit",
             "operator": "local-user",

@@ -341,43 +341,161 @@ Executor 永远不能重新规划。
 
 Tool Gateway
 
-所有服务器能力都必须封装。
+Tool Gateway 是所有 Tool invocation 的唯一边界，只允许 Executor 调用。
+Phase 2 只启用本地、确定性、无外部 I/O 的
+`get_system_status@1.0.0` Mock Tool。Restart、SSH、Docker、HTTP、数据库、Shell、
+网络和其他真实系统能力尚未进入此边界。
 
-例如：
+Phase 2 调用路径是：
 
-RestartServiceTool
+```text
+Approved immutable Plan
+        ↓
+Executor validates Plan and builds ToolCall
+        ↓
+Executor derives TargetReference and Arguments Hash
+        ↓
+Tool Gateway validates ToolCall
+        ↓
+Frozen Tool Registry exact resolution
+        ↓
+Contract / Implementation / Arguments / Target checks
+        ↓
+Private typed payload handler, at most once
+        ↓
+Payload validation and Redaction boundary
+        ↓
+Gateway-owned complete ToolResult envelope
+        ↓
+Global Result Schema + exact Contract output Schema
+        ↓
+Executor identity revalidation
+        ↓
+Runtime
+```
 
-ReadLogsTool
+Tool Gateway 负责：
 
-DockerTool
-
-HTTPTool
-
-NetworkTool
-
-禁止：
-
-Planner 直接 SSH。
-
-Tool Gateway 只允许 Executor 调用。它负责：
-
-- 按精确 Tool ID 和 Version 解析 Tool；
+- 严格重建不可变 ToolCall；
+- 按精确 Tool ID 和 Version 从已冻结 Registry 解析；
 - 校验不可变 Contract Hash 和 Implementation Hash；
-- 校验结构化输入和 Target Reference；
-- 调用 Tool；
-- 将结果包装为带 Invocation、Plan Step 和 Arguments Hash 的结构化结果；
-- 应用 Redaction Contract；
-- 拒绝未登记、已禁用、Hash 漂移或 Schema 不匹配的 Tool。
+- 以 Pydantic 和登记的 JSON Schema 双重校验具体 Arguments；
+- 重算 RFC 8785 canonical Arguments Hash；
+- 校验 Executor 提供的结构化 Target Reference 和单目标范围；
+- 最多调用一次私有 typed handler；
+- 校验 handler 只返回登记的 typed `data` payload；
+- 按固定顺序执行 Secret 扫描、Redaction、payload size 和 evidence projection；
+- 创建带 Invocation、Plan Step、Contract Hash、Arguments Hash、Target、duration、
+  data、evidence 和 structured error 的完整 ToolResult；
+- 先后用全局 Result Schema 和精确 Contract output Schema 校验完整 envelope；
+- 拒绝未登记、未冻结、已禁用、Hash 漂移、Schema 不匹配或 scope 扩大的 Tool。
+
+Tool Gateway 不负责 Policy、Approval、Plan 修改、Risk 推断、Target 发现、retry 或
+Verification 判断。它不公开 raw handler、transport、callback 或 command interface。
+
+### Tool Result and Failure Boundary
+
+Tool handler 只接收 typed arguments，并只返回 typed payload。Invocation、Step、
+Hash、Target、success/error、evidence 和 timing 均由 Gateway 创建，Tool 不能伪造。
+Contract `output_schema` 校验完整 ToolResult envelope，Tool-specific payload 位于
+`data`。
+
+在可信的精确 Tool identity 建立之前，Gateway 不得使用未经验证的数据伪造
+ToolResult：
+
+| Boundary | Result |
+| --- | --- |
+| Gateway configuration invalid | sanitized explicit exception, zero dispatch |
+| ToolCall malformed or untrusted | sanitized explicit exception, zero dispatch |
+| exact Tool resolution fails | sanitized explicit exception, zero dispatch |
+| Contract or Implementation Hash mismatch | sanitized explicit exception, zero dispatch |
+| identity/hash 已可信后的 Arguments、Target、clock、handler、timeout、output 或 Redaction 失败 | declared structured ToolResult, at most one dispatch |
+
+Executor 把前四类 exception 转换为显式 Runtime domain failure。exception 和
+ToolResult 都不能包含 raw exception、stack trace、Secret 或未脱敏输入。
+
+### Target Ownership
+
+Executor 是 ToolCall 中 `TargetReference` 的 owner。它从已经验证、Policy 检查并
+在需要时审批的不可变 Plan 确定性创建 Target；Planner、Tool 和 Gateway 都不能创建、
+发现或扩大 Target。
+
+Phase 2 的单目标 Mock 映射要求：
+
+- `resource_type` 等于 Contract `target_scope.resource_type`；
+- Contract selector 是 input Schema 中必填的字符串；
+- `target_id`、`resource_id` 和 selector 值完全一致；
+- `maximum_targets` 是 `1`；
+- Gateway 不执行 DNS、文件、网络或远程资源解析。
+
+### Redaction and Synchronous Timeout
+
+Phase 2 Redaction field list 只表示 top-level payload properties。Gateway 依次执行
+typed payload validation、JSON serialization、禁止 output field 检查、递归 Secret/
+executable marker 扫描、RFC 8785 payload byte-size 检查、top-level safe evidence
+projection、完整 envelope 构造、全局及 Contract Schema 校验。任何失败都会丢弃
+unsafe payload 并返回无 `data` 的 sanitized structured failure。
+
+Phase 2 Gateway 同步调用本地 Mock handler，并使用 monotonic nanosecond clock
+在 handler 返回后检查 elapsed time。它不能中断、取消、隔离或 kill handler，也不
+实现 transport timeout 或自动 retry。真实 timeout/cancellation 必须在未来 Executor
+设计中另行批准。
 
 ### Tool Registry
 
 Tool Registry 是 Tool Contract、Implementation Hash、Risk Metadata 和
 Registry Status 的权威目录，由 Tool Gateway 使用并向 Policy 提供只读查询。
 
-模型、Planner、Skill、Memory 和 Tool 实现都不能写入 Risk Level 或 Registry
-Status。不可变 Tool Contract 与可变 Registry Status 必须分开存储。正式
-Contract Schema 和 Result/Fixture Schema 在完成并审核前，任何 Tool 都只能是
-`design_only`。
+Registry 的 package artifact loader 必须同时加载并验证：
+
+```text
+src/ai_server/schemas/tool/tool-contract-v1.json
+src/ai_server/schemas/tool/tool-result-v1.json
+src/ai_server/schemas/tool/tool-replay-fixture-v1.json
+src/ai_server/schemas/tool/tool-registry-record-v1.json
+src/ai_server/schemas/tool/tool-implementation-bundle-v1.json
+```
+
+每个精确 Tool Version 的 package artifact set 包含 immutable Contract、独立
+Registry Record、Implementation Bundle、`uv-tool-lock-v1` dependency lock 和
+sanitized fixtures。Artifact loader：
+
+- 从 schema-validated raw JSON 以 UTF-8 RFC 8785 + SHA-256 重算裸 64 hex
+  Contract 和 Implementation Hash；
+- 对 fixture 移除 root `content_hash` 后重算裸 64 hex Hash；
+- 对 installed file bytes 和 dependency-lock bytes 校验
+  `sha256:<64-lowercase-hex>`；
+- 只接受 runtime ABI
+  `python-source-v1.requires-python-ge-3.12`；
+- 校验 manifest 中精确 `handler_entry_point`、`input_model_entry_point` 和
+  `output_model_entry_point`；
+- 证明这些 entry point 的 source modules 位于审核 manifest 并且 installed bytes
+  未漂移；
+- 校验 replay 的 identity、arguments/result hash、Target、sequence、redaction、
+  Verification 和 global/exact Schemas；
+- 失败时不产生部分 Registry entry。
+
+Registry 只在 startup 接受显式 ToolDefinition。代码中绑定的 handler/input/output
+对象的 qualified entry point 必须与 reviewed manifest 完全相同；Registry 还必须从
+installed package 解析 reviewed entry point，并校验 model 和 handler function 的
+精确对象 identity。bound method 的 `__self__` 必须是 reviewed owner class 的精确
+实例类型；伪造 `__module__` 或 `__qualname__` 不能获得注册能力。ToolDefinition
+不能提供 Metadata 或 Risk。Registry 从验证后的 Contract 生成 read-only Metadata。
+
+Startup registration 完成后 Registry 必须 freeze。Freeze 前禁止 resolution 和
+Metadata snapshot；freeze 后禁止新增或替换 entry。Policy 只读取 immutable
+Metadata snapshot。Gateway 使用 private exact resolution；raw handler 不通过 public
+Registry API 暴露。duplicate、unknown、non-registered 或 drifted identity 全部
+fail closed。
+
+模型、Planner、Skill、Memory、Evolution 和 Tool implementation 都不能写入 Risk
+Level、Metadata 或 Registry Status。不可变 Tool Contract 与 Registry Record
+分离。
+
+Phase 2 没有 mutable registry database 或 Tool approval CLI，只接受 repository
+reviewed、package-resident、`reviewer: local-owner` 的 bootstrap Registry Record。
+该 record 仅使本地 deterministic Mock capability 可发现，不替代 Execution
+Approval，也不能授权真实服务器或 mutating capability。
 
 ---
 
@@ -887,13 +1005,17 @@ approved, or active.
 
 ## Tool Gateway
 
-按受保护 Tool Registry 解析、校验和调用 Tool；不规划、不审批。
+只接受 Executor 的 ToolCall；从 frozen artifact-driven Tool Registry 精确解析，
+校验 Hash、Arguments 和 Target，最多调用一次 private typed payload handler，并
+创建及验证完整 ToolResult envelope；不规划、不审批、不推断 Risk、不 retry。
 
 ---
 
 ## Tool
 
-连接真实世界。
+提供一个小型 typed bounded capability；不规划、不授权。Phase 2 唯一 Tool 是
+无外部 I/O 的 deterministic Mock。真实世界连接只能由后续阶段按 Policy、
+Approval、Executor 和 Tool Gateway 边界另行引入。
 
 ---
 
@@ -975,6 +1097,18 @@ component may mutate Registry metadata during a task.
 禁止：
 
 Tool → Planner
+
+Planner → Tool Gateway
+
+Policy → Tool Gateway
+
+Approval → Tool Gateway
+
+Context Builder → Tool Gateway
+
+Memory → Tool Gateway
+
+Executor → Tool Registry
 
 Memory → Executor
 

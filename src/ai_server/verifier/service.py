@@ -6,8 +6,9 @@ from ai_server.models.system_status import (
     ServiceStatus,
     SystemStatus,
 )
-from ai_server.models.tool import ToolResult
+from ai_server.models.tool import TargetReference, ToolResult
 from ai_server.runtime.errors import VerificationError
+from ai_server.tools.hashing import canonical_json_sha256
 
 
 class Verifier:
@@ -47,7 +48,8 @@ class Verifier:
         for step, raw_result in zip(plan.steps, results, strict=True):
             try:
                 if (
-                    type(raw_result) is not ToolResult[SystemStatus]
+                    not isinstance(raw_result, ToolResult)
+                    or not raw_result.success
                     or type(raw_result.data) is not SystemStatus
                     or type(raw_result.data.services) is not tuple
                     or any(
@@ -64,8 +66,23 @@ class Verifier:
             except Exception:
                 raise VerificationError("Verification evidence is malformed") from None
 
-            if result.tool_name != step.tool_name or result.tool_version != step.tool_version:
+            if (
+                result.plan_step_id != step.step_id
+                or result.tool_id != step.tool_id
+                or result.tool_version != step.tool_version
+                or result.contract_hash != step.contract_hash
+                or result.arguments_hash != canonical_json_sha256(step.arguments)
+            ):
                 raise VerificationError("Verification evidence identity does not match the plan")
+            expected_target = TargetReference(
+                target_id=plan.target,
+                resource_type="local_system",
+                resource_id=step.arguments.target,
+            )
+            if result.target != expected_target:
+                raise VerificationError("Verification evidence target does not match the plan")
+            if result.data is None:
+                raise VerificationError("Verification evidence is missing payload data")
             if result.data.target != plan.target:
                 raise VerificationError("Verification evidence target does not match the plan")
             if not result.data.simulated or result.data.source != "mock":

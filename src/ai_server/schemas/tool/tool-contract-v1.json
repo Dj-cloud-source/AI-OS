@@ -1,0 +1,695 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-server:schema:tool-contract-v1",
+  "title": "AI Server Tool Contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_schema_version",
+    "schema_dialect",
+    "tool_id",
+    "version",
+    "implementation_hash",
+    "description",
+    "risk_level",
+    "approval",
+    "side_effects",
+    "target_scope",
+    "input_schema",
+    "output_schema",
+    "redaction",
+    "errors",
+    "timeout_ms",
+    "idempotent",
+    "automatic_retry",
+    "verification",
+    "rollback",
+    "replay_fixtures"
+  ],
+  "properties": {
+    "contract_schema_version": {
+      "const": "1"
+    },
+    "schema_dialect": {
+      "const": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "tool_id": {
+      "$ref": "#/$defs/toolId"
+    },
+    "version": {
+      "$ref": "#/$defs/semanticVersion"
+    },
+    "implementation_hash": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/hash"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "risk_level": {
+      "enum": [
+        "L0",
+        "L1",
+        "L2",
+        "L3"
+      ]
+    },
+    "approval": {
+      "$ref": "#/$defs/approval"
+    },
+    "side_effects": {
+      "$ref": "#/$defs/sideEffects"
+    },
+    "target_scope": {
+      "$ref": "#/$defs/targetScope"
+    },
+    "input_schema": {
+      "$ref": "#/$defs/strictObjectSchema"
+    },
+    "output_schema": {
+      "$ref": "#/$defs/strictObjectSchema"
+    },
+    "redaction": {
+      "$ref": "#/$defs/redaction"
+    },
+    "errors": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/errorDefinition"
+      }
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3600000
+    },
+    "idempotent": {
+      "type": "boolean"
+    },
+    "automatic_retry": {
+      "type": "boolean"
+    },
+    "verification": {
+      "$ref": "#/$defs/verification"
+    },
+    "rollback": {
+      "$ref": "#/$defs/rollback"
+    },
+    "replay_fixtures": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/replayFixtureReference"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "risk_level": {
+            "const": "L0"
+          }
+        },
+        "required": [
+          "risk_level"
+        ]
+      },
+      "then": {
+        "properties": {
+          "approval": {
+            "properties": {
+              "implication": {
+                "const": "automatic_execution"
+              },
+              "binds": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "risk_level": {
+            "const": "L1"
+          }
+        },
+        "required": [
+          "risk_level"
+        ]
+      },
+      "then": {
+        "properties": {
+          "approval": {
+            "properties": {
+              "implication": {
+                "const": "policy_controlled_execution"
+              },
+              "binds": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "risk_level": {
+            "const": "L2"
+          }
+        },
+        "required": [
+          "risk_level"
+        ]
+      },
+      "then": {
+        "properties": {
+          "approval": {
+            "properties": {
+              "implication": {
+                "const": "explicit_human_approval"
+              },
+              "binds": {
+                "$ref": "#/$defs/executionApprovalBindings"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "risk_level": {
+            "const": "L3"
+          }
+        },
+        "required": [
+          "risk_level"
+        ]
+      },
+      "then": {
+        "properties": {
+          "approval": {
+            "properties": {
+              "implication": {
+                "const": "explicit_human_approval_and_manual_confirmation"
+              },
+              "binds": {
+                "$ref": "#/$defs/executionApprovalBindings"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "automatic_retry": {
+            "const": true
+          }
+        },
+        "required": [
+          "automatic_retry"
+        ]
+      },
+      "then": {
+        "properties": {
+          "idempotent": {
+            "const": true
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "toolId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "semanticVersion": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]*$"
+    },
+    "fieldName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$"
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "derived_from_risk_level",
+        "implication",
+        "binds"
+      ],
+      "properties": {
+        "derived_from_risk_level": {
+          "const": true
+        },
+        "implication": {
+          "enum": [
+            "automatic_execution",
+            "policy_controlled_execution",
+            "explicit_human_approval",
+            "explicit_human_approval_and_manual_confirmation"
+          ]
+        },
+        "binds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "plan_hash",
+              "arguments",
+              "expiration"
+            ]
+          }
+        }
+      }
+    },
+    "executionApprovalBindings": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        {
+          "const": "plan_hash"
+        },
+        {
+          "const": "arguments"
+        },
+        {
+          "const": "expiration"
+        }
+      ],
+      "items": false
+    },
+    "sideEffects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mutates_remote_state",
+        "kind"
+      ],
+      "properties": {
+        "mutates_remote_state": {
+          "type": "boolean"
+        },
+        "kind": {
+          "enum": [
+            "none",
+            "read_only",
+            "service_state_change",
+            "container_state_change",
+            "configuration_change",
+            "deletion"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mutates_remote_state": {
+                "const": false
+              }
+            },
+            "required": [
+              "mutates_remote_state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "none",
+                  "read_only"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "service_state_change",
+                  "container_state_change",
+                  "configuration_change",
+                  "deletion"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "targetScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resource_type",
+        "maximum_targets",
+        "selector_field",
+        "allow_dynamic_expansion"
+      ],
+      "properties": {
+        "resource_type": {
+          "$ref": "#/$defs/identifier"
+        },
+        "maximum_targets": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "selector_field": {
+          "$ref": "#/$defs/fieldName"
+        },
+        "allow_dynamic_expansion": {
+          "const": false
+        }
+      }
+    },
+    "strictObjectSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "$id",
+        "type",
+        "additionalProperties",
+        "properties"
+      ],
+      "properties": {
+        "$schema": {
+          "const": "https://json-schema.org/draft/2020-12/schema"
+        },
+        "$id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "type": {
+          "const": "object"
+        },
+        "additionalProperties": {
+          "const": false
+        },
+        "properties": {
+          "type": "object"
+        },
+        "required": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "$defs": {
+          "type": "object"
+        },
+        "allOf": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "oneOf": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "if": {
+          "type": "object"
+        },
+        "then": {
+          "type": "object"
+        },
+        "else": {
+          "type": "object"
+        }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile_id",
+        "profile_version",
+        "input_fields",
+        "output_fields",
+        "safe_evidence_fields",
+        "max_retained_payload_bytes"
+      ],
+      "properties": {
+        "profile_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "profile_version": {
+          "$ref": "#/$defs/semanticVersion"
+        },
+        "input_fields": {
+          "$ref": "#/$defs/fieldNames"
+        },
+        "output_fields": {
+          "$ref": "#/$defs/fieldNames"
+        },
+        "safe_evidence_fields": {
+          "$ref": "#/$defs/fieldNames"
+        },
+        "max_retained_payload_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576
+        }
+      }
+    },
+    "fieldNames": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/fieldName"
+      }
+    },
+    "errorDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "category",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "category": {
+          "$ref": "#/$defs/errorCategory"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "errorCategory": {
+      "enum": [
+        "validation",
+        "resolution",
+        "integrity",
+        "target",
+        "policy_boundary",
+        "timeout",
+        "execution",
+        "output",
+        "safety",
+        "internal"
+      ]
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "evidence_fields",
+        "tools"
+      ],
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "evidence_fields": {
+          "$ref": "#/$defs/fieldNames"
+        },
+        "tools": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/toolReference"
+          }
+        }
+      }
+    },
+    "toolReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool_id",
+        "version"
+      ],
+      "properties": {
+        "tool_id": {
+          "$ref": "#/$defs/toolId"
+        },
+        "version": {
+          "$ref": "#/$defs/semanticVersion"
+        }
+      }
+    },
+    "rollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "available",
+        "strategy"
+      ],
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "strategy": {
+          "enum": [
+            "not_required",
+            "manual",
+            "separate_plan"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "required": {
+                "const": false
+              }
+            },
+            "required": [
+              "required"
+            ]
+          },
+          "then": {
+            "properties": {
+              "available": {
+                "const": false
+              },
+              "strategy": {
+                "const": "not_required"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "strategy": {
+                "enum": [
+                  "manual",
+                  "separate_plan"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "strategy": {
+                "const": "separate_plan"
+              }
+            },
+            "required": [
+              "strategy"
+            ]
+          },
+          "then": {
+            "properties": {
+              "available": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "replayFixtureReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fixture_id",
+        "path"
+      ],
+      "properties": {
+        "fixture_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$"
+        }
+      }
+    }
+  }
+}

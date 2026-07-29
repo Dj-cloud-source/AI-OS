@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ai_server.models.system_status import GetSystemStatusArguments
+from ai_server.models.tool import HashDigest, SemanticVersion, ToolId
 
 
 class StepRole(StrEnum):
@@ -24,8 +25,10 @@ class ExecutionStep(BaseModel):
 
     step_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]*$")
     role: StepRole
-    tool_name: str = Field(min_length=1)
-    tool_version: str = Field(min_length=1)
+    tool_id: ToolId
+    tool_version: SemanticVersion
+    contract_hash: HashDigest
+    implementation_hash: HashDigest
     arguments: GetSystemStatusArguments
     reason: str = Field(min_length=1)
     impact: str = Field(min_length=1)

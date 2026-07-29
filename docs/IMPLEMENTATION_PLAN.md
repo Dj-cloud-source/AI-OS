@@ -1,7 +1,7 @@
 # AIOps Agent Runtime Implementation Plan
 
-Status: Phases 0–1 baselines implemented; approval-gate conformance remediation
-and Phases 2–11 planned
+Status: Phases 0–2 and Approval Gate conformance implemented; Phases 3–11
+planned
 
 ## 1. Authority and scope
 
@@ -15,8 +15,15 @@ This plan is subordinate to the following governing documents:
 6. `AGENTS.md`
 
 Implementation proceeds phase by phase. A later phase must not be used to
-justify bypassing an earlier safety gate. Phases 0–1 implement only the local
-Mock Runtime and its fail-closed lifecycle; they add no real server capability.
+justify bypassing an earlier safety gate. Phases 0–2 implement only the local
+Mock Runtime and its fail-closed Tool boundary; they add no real server
+capability.
+
+Completed Approval Gate conformance means that every Policy-allowed Plan enters
+`WAITING_FOR_APPROVAL`, an audited `NOT_REQUIRED` decision exits immediately,
+human-approval-required work pauses without calling Executor, and direct bypass
+is rejected. Phase 4 still owns approval issuance, persistence, resumption,
+expiration, consumption, and L3 per-invocation confirmation.
 
 The decisions below are subordinate implementation guidance. When this plan
 and a governing document differ, implementation stops and the governing
@@ -193,15 +200,28 @@ Only Runtime changes Task state.
   criteria, and recovery guidance.
 - `ExecutionPlan`: schema version, plan ID, task ID, target, ordered immutable
   steps, and plan hash when canonicalized.
-- `ToolMetadata`: Tool name, version, description, static RiskLevel, timeout,
-  idempotency declaration, and argument/result model identifiers. Required
-  approval mode is not independently configurable Metadata; Policy derives it
-  from RiskLevel and the fixed risk matrix.
-- `ToolCall`: immutable Tool name/version and validated typed arguments.
+- `ToolContract`: immutable exact Tool identity, implementation binding,
+  description, static RiskLevel, deterministic approval implication, side
+  effects, target scope, strict input/output Schemas, redaction, errors,
+  timeout, retry boundary, Verification, rollback, and replay references.
+- `ToolMetadata`: read-only Registry projection derived from one validated
+  exact Tool Contract. It contains Tool ID and Version, Contract and
+  Implementation Hashes, description, static RiskLevel, timeout, idempotency,
+  Schema identities, and typed model bindings. Required approval mode is not
+  independently configurable Metadata; Policy derives it from RiskLevel and
+  the fixed risk matrix.
+- `ToolRegistryRecord`: separate status and review record binding exact Tool
+  identity, Contract Hash, Implementation Hash, reviewer, and UTC timestamps
+  without mutating the immutable Contract.
+- `ToolCall`: immutable Invocation ID, Plan Step ID, exact Tool ID and Version,
+  Contract and Implementation Hashes, canonical Arguments Hash, structured
+  Target Reference, and validated typed arguments.
 - `ToolError`: stable code, redacted message, and retryable information; it
   never grants retry permission.
-- `ToolResult`: Tool identity, success flag, typed Tool-specific data, optional
-  structured error, and non-negative duration. It is never a plain string.
+- `ToolResult`: Gateway-owned Invocation and Plan Step identity, Tool identity,
+  Contract and Arguments Hashes, Target Reference, success flag, typed
+  Tool-specific data, structured evidence, optional structured error, and
+  non-negative duration. It is never a plain string.
 - `PolicyDecision`: allow/deny, reason code, resolved risk, and required
   approval mode.
 - `ApprovalRecord`: plan hash, exact ordered arguments, approver, approval mode,
@@ -227,7 +247,7 @@ empty future interfaces:
 | --- | --- |
 | Task, RuntimeContext, ExecutionPlan, ExecutionStep, ToolMetadata, ToolResult | Phase 0 |
 | RuntimeOutcome and lifecycle events | Phase 1 |
-| ToolCall and ToolError | Phase 2 |
+| ToolContract, ToolRegistryRecord, ToolCall, ToolError, and replay/implementation artifacts | Phase 2 |
 | PolicyDecision | Phase 3 |
 | ApprovalRecord | Phase 4 |
 | ExecutionReport | Phase 5 |
@@ -286,7 +306,8 @@ revalidation, and can never start a second attempt.
 
 ## Phase 0 — Foundation
 
-Status: Baseline implemented (2026-07-25); approval-gate conformance pending
+Status: Implemented (2026-07-25); Approval Gate conformance completed
+(2026-07-26)
 
 ### Goal
 
@@ -360,7 +381,8 @@ agents, and cloud services.
 
 ## Phase 1 — Runtime
 
-Status: Baseline implemented (2026-07-25); approval-gate conformance pending
+Status: Implemented (2026-07-25); Approval Gate conformance completed
+(2026-07-26)
 
 ### Goal
 
@@ -432,61 +454,190 @@ sessions, approval persistence, Incident Memory, and remote targets.
 
 ## Phase 2 — Tool Protocol
 
+Status: Implemented (2026-07-29); only the reviewed local
+`get_system_status@1.0.0` Mock artifact is registered
+
 ### Goal
 
-Establish a small, typed protocol through which every operational capability is
-described, validated, dispatched, and reported.
+Establish a small, typed, artifact-driven protocol through which every
+operational capability is described, integrity-bound, validated, dispatched,
+and reported without enabling real system access.
 
 ### Inputs
 
-- Phase 1 Runtime orchestration.
-- Phase 0 Tool Metadata and ToolResult models.
+- The completed Phase 1 Runtime orchestration and Approval Gate.
+- Phase 0 Tool Metadata, RiskLevel, and ToolResult models.
 - The static L0 `get_system_status` Mock Tool.
+- `docs/TOOL_SPEC.md`, including its fail-closed registration gates.
 
 ### Outputs
 
-- A stable Tool contract and deterministic Tool Gateway.
-- Typed Tool-specific input and output models.
-- Structured, redacted Tool errors.
+- Five versioned, package-resident JSON Schema Draft 2020-12 meta-schemas.
+- Immutable Tool Contract, Registry Record, Implementation Bundle, ToolCall,
+  ToolResult, ToolError, and replay-fixture models.
+- A frozen artifact-driven Registry and deterministic Tool Gateway.
+- Typed Tool-specific input and payload models.
+- Structured, bounded, and redacted Tool results and errors.
+- Sanitized offline Mock replay evidence and reproducible local build evidence.
 
 ### Deliverables
 
-- One minimal Tool protocol with metadata and an invoke operation.
-- Explicit Tool registration by immutable name and version.
-- Input validation before dispatch and output validation after return.
-- Stable errors for unknown Tool, duplicate registration, invalid arguments,
-  timeout declaration violations, and malformed output.
-- Migration of the Mock Tool to the final protocol.
-- Gateway behavior limited to registration, exact resolution, input/output
-  validation, and bounded invocation on Executor's request.
+- Versioned local Schemas for:
+  - Tool Contract;
+  - Tool Result;
+  - Tool Replay Fixture;
+  - Tool Registry Record;
+  - Tool Implementation Bundle.
+- One package-resident reviewed artifact set for every exact Tool version:
+  immutable `contract.json`, separate `registry-record.json`,
+  `implementation-bundle.json`, deterministic dependency-lock evidence, and
+  referenced sanitized fixtures.
+- UTF-8 RFC 8785 canonical JSON plus SHA-256 helpers for Contract,
+  Implementation, Arguments, and Fixture hashes. Each artifact defines its
+  exact hash input and excluded self-hash or mutable status fields.
+- An artifact loader that validates all five meta-schemas, validates nested
+  Contract input/output Schemas, verifies ABI and dependency-lock identity,
+  hashes every declared installed implementation file, rejects undeclared or
+  unsafe paths, and verifies fixture references and contents.
+- An explicit startup Registry keyed by immutable `(tool_id, version)`. It
+  derives read-only authoritative Tool Metadata from the validated Contract
+  rather than caller-supplied metadata, rejects duplicate or non-registered
+  identities, and freezes before Policy or Gateway lookup.
+- A strict immutable ToolCall binding Invocation ID, Plan Step ID, exact Tool
+  identity, Contract Hash, Implementation Hash, canonical Arguments Hash,
+  structured Target Reference, and typed arguments.
+- A Gateway-owned ToolResult envelope with typed Tool-specific payload data,
+  structured evidence, one sanitized ToolError on failure, and bounded
+  duration. The complete envelope validates against the global Tool Result
+  Schema and the exact Contract output Schema.
+- A Gateway callable only by Executor. It exact-resolves through the frozen
+  Registry; checks identity and hashes; validates input before dispatch with
+  both Pydantic and the registered Schema; validates target scope; invokes once;
+  validates output after return; applies redaction and retained-size bounds;
+  and maps failures to stable errors.
+- Migration of `get_system_status` to a deterministic typed payload-only Mock
+  handler. It returns no trusted envelope fields and performs no external I/O.
+- A sanitized offline replay-validation path that consumes only recorded Tool
+  Results, local fixtures, or Mock Tools; never invokes production Tool code;
+  and checks identity, Contract and Arguments hashes, invocation order,
+  schemas, expected outcome or error, Verification evidence, and redaction
+  evidence.
+- A repository-local dependency lock generated and checked with `uv`. Each
+  Tool's reviewed dependency-lock evidence is deterministically bound to its
+  implementation manifest and to the locally resolved dependency set.
+- Local-only build gates that create source and wheel artifacts, inspect
+  packaged resources, run lint, formatting, type, and test checks on the
+  source tree, install the wheel into a clean local environment, and run
+  package-resource, import, CLI, and Mock Runtime smoke checks there.
 
 ### Acceptance Criteria
 
-- Tool Metadata owns RiskLevel; a plan may reference but cannot redefine it.
-- The gateway rejects an unknown Tool name or version.
-- Duplicate name/version registration fails at startup.
-- Every invocation returns ToolResult with Tool-specific typed data or a
-  structured error.
-- Raw transport objects, callbacks, and command strings never cross the Tool
-  boundary.
-- Tool code never imports Planner, Approval, or Policy.
-- Production code invokes a Tool only through Executor; direct invocation is
-  limited to isolated Tool unit tests.
+- No Tool becomes available unless all five normative Schemas load from the
+  installed package and every Contract, Registry Record, Implementation Bundle,
+  dependency lock, declared file, and referenced fixture passes strict
+  validation.
+- Contract Hash is recomputed over schema-validated raw Contract JSON using
+  UTF-8 RFC 8785 canonical JSON and SHA-256, excluding only the explicitly
+  defined self-hash or mutable Registry fields. Implementation, Arguments, and
+  Fixture hashes use their separately defined canonical inputs and exclusions.
+- The Registry Record exactly binds Tool ID, Version, Contract Hash,
+  Implementation Hash, `registered` status, reviewer, and UTC timestamps
+  without mutating the Contract.
+- Registered Metadata is derived from the exact validated artifact set.
+  RiskLevel, timeout, idempotency, schema identities, Contract Hash, and
+  Implementation Hash cannot be supplied or overridden by Planner, caller
+  arguments, Tool implementation, fixture, or Runtime text.
+- Duplicate identity, design-only/disabled/deprecated status, missing review,
+  ABI mismatch, dependency-lock drift, installed-file drift, undeclared code,
+  malformed Schema, missing fixture, Secret/executable content, or any hash
+  mismatch fails registration closed.
+- Registry lookup is unavailable until startup registration is frozen. After
+  freeze, mutation is rejected and resolution requires an exact registered
+  `(tool_id, version)`.
+- The Gateway accepts only a strict ToolCall received from Executor, exact-
+  resolves the same Contract and implementation, and rejects identity, hash,
+  arguments, target, or scope mismatch before handler dispatch.
+- Defaults, when a Contract permits them, are materialized before Plan hashing
+  and Approval. The Gateway neither injects hidden defaults nor changes
+  approved arguments.
+- The handler receives one typed validated arguments object and returns only
+  one typed payload object. The Gateway owns trusted invocation, target, hash,
+  timing, success/error, evidence, and envelope fields.
+- Every success and failure is a complete ToolResult. The global Tool Result
+  Schema and exact Contract output Schema validate the final envelope; free
+  strings, raw exceptions, callbacks, transports, and command strings never
+  cross the boundary.
+- Redaction and payload-size limits are enforced before a result, fixture, log,
+  Incident, or replay artifact can be retained. Redaction failure returns a
+  safe structured failure and does not preserve unsafe raw content.
+- The Gateway dispatches at most once. A timeout observed after return is a
+  structured failure and never authorizes retry; Phase 2 adds no process
+  cancellation or real transport timeout mechanism.
+- Tool code imports no Planner, Policy, Approval, Memory, LLM/model adapter,
+  SSH, Docker, database, network, shell, or subprocess capability.
+- Only Executor may invoke the Gateway in application code. The Registry does
+  not expose its private handler binding through a public API to Planner,
+  Policy, Approval, Skills, Memory, or Runtime callers; isolated unit tests may
+  call the Mock handler directly.
+- Fixture and replay validation runs offline with production connections
+  disabled and never invokes production Tool code. It rejects mismatched
+  identity, version, hashes, sequence, Schema, outcome, redaction report, or
+  fixture content.
+- The repository-local `uv` lock check is clean and a frozen local dependency
+  sync is reproducible without global installation.
+- Source distribution and wheel build successfully. The wheel contains all
+  five Schemas and the complete reviewed Mock Tool artifact set. A clean local
+  wheel installation passes package-resource loading, import,
+  `ai-server version`, `ai-server doctor`, and Mock Runtime smoke checks. The
+  corresponding source tree passes pytest, Ruff, formatting, and strict mypy.
+- No Phase 2 test or runtime path opens SSH, invokes an LLM/model, runs shell
+  commands, calls Docker or Kubernetes, accesses a database, opens a network
+  connection, resolves a remote target, or performs other real system I/O.
 
 ### Test Requirements
 
-- Contract tests run against every registered Tool.
-- Tests cover argument coercion rejection where it could weaken safety,
-  malformed output, unknown versions, duplicate registration, and stable error
-  codes.
-- Tests prove risk cannot be overridden through ExecutionStep arguments.
-- Redaction tests cover error messages and Tool-specific payloads.
-- The Mock Tool remains deterministic and external-I/O-free.
+- Schema tests validate and negatively mutate all five meta-schemas, their
+  stable local `$id` values, unknown-field rejection, nested enums, and
+  expressible cross-field constraints.
+- Hash tests use independent RFC 8785 vectors and cover raw-artifact hashing,
+  Unicode and numeric canonicalization, ordering, every exclusion rule, and
+  one-bit drift.
+- Artifact tests cover missing and malformed files, Contract/Registry/manifest
+  mismatch, status and review rules, dependency lock and ABI mismatch,
+  installed-file digest drift, undeclared/duplicate/traversal/symlink paths,
+  missing or duplicate fixtures, Secret and executable-payload scanning, and
+  artifact-derived Metadata.
+- Registry tests cover duplicate identity, pre-freeze lookup, post-freeze
+  mutation, exact-version resolution, unavailable status, immutable snapshots,
+  and private handler access.
+- Gateway tests cover strict ToolCall reconstruction, wrong Contract or
+  Implementation Hash, arguments hash mismatch, Pydantic and JSON Schema input
+  failure, target expansion, one dispatch, handler exception, malformed typed
+  payload, global and Contract output validation, clock failure, declared
+  timeout, redaction, retained-size bounds, and stable sanitized errors.
+- Replay tests cover deterministic Mock and recorded fixtures, exact sequence
+  matching, identity and hash drift, expected outcomes, Verification evidence,
+  redaction report, fixture content hash, production-handler non-invocation,
+  and technical external-I/O blocking.
+- Boundary tests prove only Executor application code can call Gateway and no
+  forbidden dependency enters Tool modules.
+- The manual release packaging gate builds both source and wheel artifacts
+  locally, inspects package data, installs the wheel into a clean local
+  environment, and repeats import, CLI, Mock Runtime, schema, artifact, and
+  replay smoke checks. It is recorded separately from the hermetic unit-test
+  suite because dependency installation may require a pre-populated local
+  package cache.
+- Required gates are `pytest`, `ruff check .`, `ruff format --check .`, strict
+  `mypy src tests`, a clean repository-local `uv` lock/frozen-sync check, and
+  successful local source/wheel build plus clean-wheel smoke tests.
 
 ### Out of Scope
 
-Dynamic discovery, plugins, arbitrary user Tools, SSH, Docker, real timeouts,
-remote execution, retries, and mutating operations.
+Dynamic discovery, plugins, arbitrary user Tools, SSH or remote credentials,
+LLMs or model adapters, Docker, Kubernetes, HTTP, database or network access,
+arbitrary Shell or subprocesses, real transport timeouts, process isolation,
+automatic retry, remote execution, production registration, and every mutating
+operation.
 
 ## Phase 3 — Policy Engine
 

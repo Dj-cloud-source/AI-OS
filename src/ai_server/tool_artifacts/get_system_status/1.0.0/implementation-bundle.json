@@ -1,0 +1,27 @@
+{
+  "artifact_format": "tool-implementation-bundle-v1",
+  "tool_id": "get_system_status",
+  "version": "1.0.0",
+  "runtime_abi": "python-source-v1.requires-python-ge-3.12",
+  "handler_entry_point": "ai_server.tools.get_system_status:GetSystemStatusTool.invoke",
+  "input_model_entry_point": "ai_server.models.system_status:GetSystemStatusArguments",
+  "output_model_entry_point": "ai_server.models.system_status:SystemStatus",
+  "dependency_lock_sha256": "sha256:695e63b9baa4f2ed0218c80fcc500bc4b7bb53961c16cde5d8697ad66e31d20a",
+  "files": [
+    {
+      "path": "ai_server/models/system_status.py",
+      "size_bytes": 1176,
+      "sha256": "sha256:b1dd9b432b226b9763bf05266eafa4e5dbf828d68bbb02512a56a2fd9b04176a"
+    },
+    {
+      "path": "ai_server/tool_artifacts/get_system_status/1.0.0/dependency-lock.json",
+      "size_bytes": 26946,
+      "sha256": "sha256:695e63b9baa4f2ed0218c80fcc500bc4b7bb53961c16cde5d8697ad66e31d20a"
+    },
+    {
+      "path": "ai_server/tools/get_system_status.py",
+      "size_bytes": 1430,
+      "sha256": "sha256:494cdc7b2b6d18bfdda0a55e86023358bca63c77749a3ebc50cb16dc344e1d2a"
+    }
+  ]
+}

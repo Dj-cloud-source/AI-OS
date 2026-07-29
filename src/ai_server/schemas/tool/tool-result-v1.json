@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-server:schema:tool-result-v1",
+  "title": "AI Server Tool Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "invocation_id",
+    "plan_step_id",
+    "tool_id",
+    "tool_version",
+    "contract_hash",
+    "arguments_hash",
+    "target",
+    "success",
+    "data",
+    "evidence",
+    "error",
+    "duration_ms"
+  ],
+  "properties": {
+    "invocation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "plan_step_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "tool_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "tool_version": {
+      "$ref": "#/$defs/semanticVersion"
+    },
+    "contract_hash": {
+      "$ref": "#/$defs/hash"
+    },
+    "arguments_hash": {
+      "$ref": "#/$defs/hash"
+    },
+    "target": {
+      "$ref": "#/$defs/targetReference"
+    },
+    "success": {
+      "type": "boolean"
+    },
+    "data": {
+      "oneOf": [
+        {
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "maxProperties": 128
+    },
+    "error": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/toolError"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "success": {
+          "const": true
+        },
+        "data": {
+          "type": "object"
+        },
+        "error": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "success",
+        "data",
+        "error"
+      ]
+    },
+    {
+      "properties": {
+        "success": {
+          "const": false
+        },
+        "data": {
+          "type": "null"
+        },
+        "error": {
+          "$ref": "#/$defs/toolError"
+        }
+      },
+      "required": [
+        "success",
+        "data",
+        "error"
+      ]
+    }
+  ],
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "semanticVersion": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "targetReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_id",
+        "resource_type",
+        "resource_id"
+      ],
+      "properties": {
+        "target_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]*$"
+        },
+        "resource_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]*$"
+        },
+        "resource_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]*$"
+        }
+      }
+    },
+    "toolError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "category",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "category": {
+          "enum": [
+            "validation",
+            "resolution",
+            "integrity",
+            "target",
+            "policy_boundary",
+            "timeout",
+            "execution",
+            "output",
+            "safety",
+            "internal"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

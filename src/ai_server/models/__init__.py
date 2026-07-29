@@ -16,7 +16,18 @@ from ai_server.models.system_status import (
     SystemStatus,
 )
 from ai_server.models.task import Task
-from ai_server.models.tool import RiskLevel, ToolMetadata, ToolResult
+from ai_server.models.tool import (
+    RiskLevel,
+    TargetReference,
+    ToolCall,
+    ToolContract,
+    ToolError,
+    ToolErrorCategory,
+    ToolMetadata,
+    ToolRegistryRecord,
+    ToolRegistryStatus,
+    ToolResult,
+)
 
 __all__ = [
     "ExecutionPlan",
@@ -33,7 +44,14 @@ __all__ = [
     "ServiceStatus",
     "StepRole",
     "Task",
+    "TargetReference",
+    "ToolCall",
+    "ToolContract",
+    "ToolError",
+    "ToolErrorCategory",
     "ToolMetadata",
+    "ToolRegistryRecord",
+    "ToolRegistryStatus",
     "ToolResult",
     "SystemStatus",
 ]

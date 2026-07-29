@@ -1,0 +1,467 @@
+{
+  "contract_schema_version": "1",
+  "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+  "tool_id": "get_system_status",
+  "version": "1.0.0",
+  "implementation_hash": "6ac7ae58ab08b6cff2ded41c82091d6e727291d1e0d5cad7ae38afb32dec9746",
+  "description": "Return deterministic simulated status for the fixed local mock target.",
+  "risk_level": "L0",
+  "approval": {
+    "derived_from_risk_level": true,
+    "implication": "automatic_execution",
+    "binds": []
+  },
+  "side_effects": {
+    "mutates_remote_state": false,
+    "kind": "none"
+  },
+  "target_scope": {
+    "resource_type": "local_system",
+    "maximum_targets": 1,
+    "selector_field": "target",
+    "allow_dynamic_expansion": false
+  },
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:ai-server:tool:get_system_status:1.0.0:input",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "target"
+    ],
+    "properties": {
+      "target": {
+        "const": "local-mock"
+      }
+    }
+  },
+  "output_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:ai-server:tool:get_system_status:1.0.0:result",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "invocation_id",
+      "plan_step_id",
+      "tool_id",
+      "tool_version",
+      "contract_hash",
+      "arguments_hash",
+      "target",
+      "success",
+      "data",
+      "evidence",
+      "error",
+      "duration_ms"
+    ],
+    "properties": {
+      "invocation_id": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "plan_step_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[a-z0-9][a-z0-9_-]*$"
+      },
+      "tool_id": {
+        "const": "get_system_status"
+      },
+      "tool_version": {
+        "const": "1.0.0"
+      },
+      "contract_hash": {
+        "$ref": "#/$defs/hash"
+      },
+      "arguments_hash": {
+        "$ref": "#/$defs/hash"
+      },
+      "target": {
+        "$ref": "#/$defs/targetReference"
+      },
+      "success": {
+        "type": "boolean"
+      },
+      "data": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/systemStatus"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "evidence": {
+        "$ref": "#/$defs/evidence"
+      },
+      "error": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/error"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "duration_ms": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1000
+      }
+    },
+    "oneOf": [
+      {
+        "properties": {
+          "success": {
+            "const": true
+          },
+          "target": {
+            "$ref": "#/$defs/allowedTarget"
+          },
+          "data": {
+            "$ref": "#/$defs/systemStatus"
+          },
+          "evidence": {
+            "$ref": "#/$defs/successEvidence"
+          },
+          "error": {
+            "type": "null"
+          }
+        },
+        "required": [
+          "success",
+          "target",
+          "data",
+          "evidence",
+          "error"
+        ]
+      },
+      {
+        "properties": {
+          "success": {
+            "const": false
+          },
+          "data": {
+            "type": "null"
+          },
+          "evidence": {
+            "type": "object",
+            "additionalProperties": false,
+            "maxProperties": 0
+          },
+          "error": {
+            "$ref": "#/$defs/error"
+          }
+        },
+        "required": [
+          "success",
+          "data",
+          "evidence",
+          "error"
+        ]
+      }
+    ],
+    "$defs": {
+      "hash": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "targetReference": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_id",
+          "resource_type",
+          "resource_id"
+        ],
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]*$"
+          },
+          "resource_type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]*$"
+          },
+          "resource_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]*$"
+          }
+        }
+      },
+      "allowedTarget": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_id",
+          "resource_type",
+          "resource_id"
+        ],
+        "properties": {
+          "target_id": {
+            "const": "local-mock"
+          },
+          "resource_type": {
+            "const": "local_system"
+          },
+          "resource_id": {
+            "const": "local-mock"
+          }
+        }
+      },
+      "serviceStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "state"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "state": {
+            "enum": [
+              "running",
+              "stopped"
+            ]
+          }
+        }
+      },
+      "systemStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "simulated",
+          "target",
+          "hostname",
+          "cpu_percent",
+          "memory_percent",
+          "disk_percent",
+          "services"
+        ],
+        "properties": {
+          "source": {
+            "const": "mock"
+          },
+          "simulated": {
+            "const": true
+          },
+          "target": {
+            "const": "local-mock"
+          },
+          "hostname": {
+            "const": "mock-server"
+          },
+          "cpu_percent": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "memory_percent": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "disk_percent": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "services": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "$ref": "#/$defs/serviceStatus"
+            }
+          }
+        }
+      },
+      "evidence": {
+        "type": "object",
+        "additionalProperties": false,
+        "maxProperties": 4,
+        "properties": {
+          "source": {
+            "const": "mock"
+          },
+          "simulated": {
+            "const": true
+          },
+          "target": {
+            "const": "local-mock"
+          },
+          "hostname": {
+            "const": "mock-server"
+          }
+        }
+      },
+      "successEvidence": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "simulated",
+          "target",
+          "hostname"
+        ],
+        "properties": {
+          "source": {
+            "const": "mock"
+          },
+          "simulated": {
+            "const": true
+          },
+          "target": {
+            "const": "local-mock"
+          },
+          "hostname": {
+            "const": "mock-server"
+          }
+        }
+      },
+      "error": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "category",
+          "message",
+          "retryable"
+        ],
+        "properties": {
+          "code": {
+            "enum": [
+              "arguments_hash_mismatch",
+              "gateway_clock_failed",
+              "invalid_arguments",
+              "malformed_tool_output",
+              "result_redaction_failed",
+              "target_not_allowed",
+              "tool_execution_failed",
+              "tool_timeout"
+            ]
+          },
+          "category": {
+            "enum": [
+              "execution",
+              "integrity",
+              "internal",
+              "output",
+              "safety",
+              "target",
+              "timeout",
+              "validation"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "retryable": {
+            "const": false
+          }
+        }
+      }
+    }
+  },
+  "redaction": {
+    "profile_id": "tool-redaction-default",
+    "profile_version": "1.0.0",
+    "input_fields": [],
+    "output_fields": [],
+    "safe_evidence_fields": [
+      "source",
+      "simulated",
+      "target",
+      "hostname"
+    ],
+    "max_retained_payload_bytes": 4096
+  },
+  "errors": [
+    {
+      "code": "arguments_hash_mismatch",
+      "category": "integrity",
+      "message": "Tool argument integrity validation failed",
+      "retryable": false
+    },
+    {
+      "code": "gateway_clock_failed",
+      "category": "internal",
+      "message": "Tool invocation timing could not be established safely",
+      "retryable": false
+    },
+    {
+      "code": "invalid_arguments",
+      "category": "validation",
+      "message": "Tool arguments failed strict validation",
+      "retryable": false
+    },
+    {
+      "code": "malformed_tool_output",
+      "category": "output",
+      "message": "Tool returned invalid structured output",
+      "retryable": false
+    },
+    {
+      "code": "result_redaction_failed",
+      "category": "safety",
+      "message": "Tool output could not be retained safely",
+      "retryable": false
+    },
+    {
+      "code": "target_not_allowed",
+      "category": "target",
+      "message": "Tool target does not match its registered scope",
+      "retryable": false
+    },
+    {
+      "code": "tool_execution_failed",
+      "category": "execution",
+      "message": "Tool execution failed safely",
+      "retryable": false
+    },
+    {
+      "code": "tool_timeout",
+      "category": "timeout",
+      "message": "Tool exceeded its registered timeout",
+      "retryable": false
+    }
+  ],
+  "timeout_ms": 1000,
+  "idempotent": true,
+  "automatic_retry": false,
+  "verification": {
+    "required": true,
+    "evidence_fields": [
+      "simulated",
+      "source",
+      "target"
+    ],
+    "tools": []
+  },
+  "rollback": {
+    "required": false,
+    "available": false,
+    "strategy": "not_required"
+  },
+  "replay_fixtures": [
+    {
+      "fixture_id": "get-system-status-success",
+      "path": "fixtures/success.mock.json"
+    }
+  ]
+}

@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-server:schema:tool-registry-record-v1",
+  "title": "AI Server Tool Registry Record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_schema_version",
+    "tool_id",
+    "version",
+    "contract_hash",
+    "implementation_hash",
+    "status",
+    "reviewer",
+    "reviewed_at",
+    "registered_at"
+  ],
+  "properties": {
+    "record_schema_version": {
+      "const": "1"
+    },
+    "tool_id": {
+      "$ref": "#/$defs/toolId"
+    },
+    "version": {
+      "$ref": "#/$defs/semanticVersion"
+    },
+    "contract_hash": {
+      "$ref": "#/$defs/hash"
+    },
+    "implementation_hash": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/hash"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "enum": [
+        "design_only",
+        "registered",
+        "deprecated",
+        "disabled"
+      ]
+    },
+    "reviewer": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "reviewed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "registered_at": {
+      "oneOf": [
+        {
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "registered"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "implementation_hash": {
+            "$ref": "#/$defs/hash"
+          },
+          "registered_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "toolId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "semanticVersion": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    }
+  }
+}

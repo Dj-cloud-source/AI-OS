@@ -10,8 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from ai_server.models.execution import ExecutionPlan
 from ai_server.models.system_status import SystemStatus
 from ai_server.models.task import Task
-from ai_server.models.tool import ToolResult
+from ai_server.models.tool import TargetReference, ToolResult
 from ai_server.runtime.state import RuntimeState, RuntimeStateMachine
+from ai_server.tools.hashing import canonical_json_sha256
 
 
 class RuntimeOutcomeStatus(StrEnum):
@@ -299,9 +300,34 @@ class RuntimeOutcome(BaseModel):
         if executor_completed and len(self.results) != len(self.plan.steps):
             raise ValueError("a completed Executor requires one result per planned step")
         if not executor_completed and self.results:
-            raise ValueError("Tool results require a completed Executor stage")
+            executor_failed = (
+                self.failure is not None
+                and self.failure.component is RuntimeComponent.EXECUTOR
+                and self.task.state is RuntimeState.FAILED
+                and len(self.task.state_history) >= 2
+                and self.task.state_history[-2] is RuntimeState.EXECUTING
+            )
+            if (
+                not executor_failed
+                or len(self.results) > len(self.plan.steps)
+                or self.results[-1].success
+                or any(not result.success for result in self.results[:-1])
+            ):
+                raise ValueError("Incomplete Executor results require one final structured failure")
         for step, result in zip(self.plan.steps, self.results, strict=False):
-            if result.tool_name != step.tool_name or result.tool_version != step.tool_version:
+            expected_target = TargetReference(
+                target_id=self.plan.target,
+                resource_type="local_system",
+                resource_id=step.arguments.target,
+            )
+            if (
+                result.plan_step_id != step.step_id
+                or result.tool_id != step.tool_id
+                or result.tool_version != step.tool_version
+                or result.contract_hash != step.contract_hash
+                or result.arguments_hash != canonical_json_sha256(step.arguments)
+                or result.target != expected_target
+            ):
                 raise ValueError("execution result identity must match its planned step")
 
     def _validate_terminal_shape(self) -> None:
@@ -311,6 +337,7 @@ class RuntimeOutcome(BaseModel):
                 self.task.state is not RuntimeState.COMPLETED
                 or self.plan is None
                 or len(self.results) != len(self.plan.steps)
+                or any(not result.success for result in self.results)
                 or self.failure is not None
                 or final_event.kind is not LifecycleEventKind.STATE_ENTERED
             ):

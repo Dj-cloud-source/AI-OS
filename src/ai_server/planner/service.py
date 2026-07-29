@@ -9,19 +9,8 @@ from ai_server.models.tool import ToolMetadata
 from ai_server.runtime.errors import InvalidTaskError, UnsupportedTaskError
 
 SUPPORTED_REQUEST = "get_system_status"
-GET_SYSTEM_STATUS_STEP = ExecutionStep(
-    step_id="get-system-status",
-    role=StepRole.OBSERVE,
-    tool_name="get_system_status",
-    tool_version="1.0.0",
-    arguments=GetSystemStatusArguments(),
-    reason="Collect simulated system status for the local Runtime check.",
-    impact="No external impact; the Tool returns deterministic mock data.",
-    verification=(
-        "Confirm Tool identity, version, target, and explicitly simulated structured mock evidence."
-    ),
-    recovery="No rollback is required for a read-only mock operation.",
-)
+GET_SYSTEM_STATUS_TOOL_ID = "get_system_status"
+GET_SYSTEM_STATUS_TOOL_VERSION = "1.0.0"
 
 
 class Planner:
@@ -59,18 +48,39 @@ class Planner:
             raise UnsupportedTaskError("Planner rejected malformed Tool metadata") from None
 
         if (
-            metadata.name != GET_SYSTEM_STATUS_STEP.tool_name
-            or metadata.version != GET_SYSTEM_STATUS_STEP.tool_version
+            metadata.tool_id != GET_SYSTEM_STATUS_TOOL_ID
+            or metadata.version != GET_SYSTEM_STATUS_TOOL_VERSION
         ):
             raise UnsupportedTaskError("Unsupported Phase 1 Tool metadata")
         try:
+            step = ExecutionStep(
+                step_id="get-system-status",
+                role=StepRole.OBSERVE,
+                tool_id=metadata.tool_id,
+                tool_version=metadata.version,
+                contract_hash=metadata.contract_hash,
+                implementation_hash=metadata.implementation_hash,
+                arguments=GetSystemStatusArguments(),
+                reason="Collect simulated system status for the local Runtime check.",
+                impact="No external impact; the Tool returns deterministic mock data.",
+                verification=(
+                    "Confirm Tool identity, version, target, and explicitly simulated "
+                    "structured mock evidence."
+                ),
+                recovery="No rollback is required for a read-only mock operation.",
+            )
             return ExecutionPlan(
                 task_id=context.task_id,
                 target=context.target,
-                steps=(GET_SYSTEM_STATUS_STEP,),
+                steps=(step,),
             )
         except Exception:
             raise UnsupportedTaskError("Planner could not create a valid execution plan") from None
 
 
-__all__ = ["GET_SYSTEM_STATUS_STEP", "Planner", "SUPPORTED_REQUEST"]
+__all__ = [
+    "GET_SYSTEM_STATUS_TOOL_ID",
+    "GET_SYSTEM_STATUS_TOOL_VERSION",
+    "Planner",
+    "SUPPORTED_REQUEST",
+]

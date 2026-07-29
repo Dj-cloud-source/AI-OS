@@ -50,7 +50,6 @@ def test_doctor_command_is_safe_and_uses_mock_runtime(monkeypatch: pytest.Monkey
         monkeypatch.setattr(os, function_name, fail_external_call)
     for method_name in (
         "mkdir",
-        "open",
         "rename",
         "replace",
         "rmdir",

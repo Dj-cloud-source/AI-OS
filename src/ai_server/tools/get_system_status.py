@@ -1,56 +1,47 @@
 """Deterministic mock system-status Tool."""
 
+from typing import ClassVar
+
 from ai_server.models.system_status import (
     GetSystemStatusArguments,
     ServiceStatus,
     SystemStatus,
 )
-from ai_server.models.tool import RiskLevel, ToolMetadata, ToolResult
-from ai_server.runtime.errors import ToolExecutionError
-
-GET_SYSTEM_STATUS_METADATA = ToolMetadata(
-    name="get_system_status",
-    version="1.0.0",
-    description="Return deterministic simulated system status.",
-    risk_level=RiskLevel.L0,
-    timeout_seconds=1.0,
-    idempotent=True,
-    input_model="GetSystemStatusArguments",
-    output_model="SystemStatus",
-)
 
 
-def get_system_status(arguments: GetSystemStatusArguments) -> ToolResult[SystemStatus]:
-    """Return deterministic mock data without inspecting the local machine."""
-    try:
-        if type(arguments) is not GetSystemStatusArguments:
-            raise TypeError
-        arguments = GetSystemStatusArguments.model_validate(
-            arguments.model_dump(mode="python", warnings="none"),
-            strict=True,
-        )
-        status = SystemStatus(
-            target=arguments.target,
+class InvalidSystemStatusArgumentsError(ValueError):
+    """Raised when the Mock Tool receives malformed typed arguments."""
+
+    code: ClassVar[str] = "invalid_system_status_arguments"
+
+
+class GetSystemStatusTool:
+    """Return deterministic simulated status without inspecting any system."""
+
+    def invoke(self, arguments: GetSystemStatusArguments) -> SystemStatus:
+        """Validate typed arguments and return payload data only."""
+        try:
+            if type(arguments) is not GetSystemStatusArguments:
+                raise TypeError
+            validated_arguments = GetSystemStatusArguments.model_validate(
+                arguments.model_dump(mode="python", warnings="error"),
+                strict=True,
+            )
+        except BaseException:
+            raise InvalidSystemStatusArgumentsError(
+                "Mock Tool rejected malformed arguments"
+            ) from None
+
+        return SystemStatus(
+            target=validated_arguments.target,
             cpu_percent=12.5,
             memory_percent=34.0,
             disk_percent=45.5,
             services=(ServiceStatus(name="mock-api", state="running"),),
         )
-        return ToolResult[SystemStatus](
-            tool_name=GET_SYSTEM_STATUS_METADATA.name,
-            tool_version=GET_SYSTEM_STATUS_METADATA.version,
-            success=True,
-            data=status,
-            duration_ms=0,
-        )
-    except Exception:
-        raise ToolExecutionError("Mock Tool rejected malformed arguments") from None
 
 
 __all__ = [
-    "GET_SYSTEM_STATUS_METADATA",
-    "GetSystemStatusArguments",
-    "ServiceStatus",
-    "SystemStatus",
-    "get_system_status",
+    "GetSystemStatusTool",
+    "InvalidSystemStatusArgumentsError",
 ]

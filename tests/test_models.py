@@ -13,10 +13,15 @@ from ai_server.models.system_status import (
     SystemStatus,
 )
 from ai_server.models.task import Task
-from ai_server.models.tool import RiskLevel, ToolMetadata, ToolResult
+from ai_server.models.tool import RiskLevel, TargetReference, ToolMetadata, ToolResult
 from ai_server.planner.service import Planner
 from ai_server.runtime.errors import InvalidTaskError, UnsupportedTaskError
 from ai_server.runtime.state import RuntimeState
+from ai_server.tools.hashing import canonical_json_sha256
+
+CONTRACT_HASH = "a" * 64
+IMPLEMENTATION_HASH = "b" * 64
+INVOCATION_ID = UUID("00000000-0000-4000-8000-000000000001")
 
 
 def assign_attribute(instance: object, name: str, value: object) -> None:
@@ -27,8 +32,10 @@ def make_step(*, step_id: str = "status") -> ExecutionStep:
     return ExecutionStep(
         step_id=step_id,
         role=StepRole.OBSERVE,
-        tool_name="get_system_status",
+        tool_id="get_system_status",
         tool_version="1.0.0",
+        contract_hash=CONTRACT_HASH,
+        implementation_hash=IMPLEMENTATION_HASH,
         arguments=GetSystemStatusArguments(),
         reason="Collect simulated status.",
         impact="No external impact.",
@@ -48,14 +55,44 @@ def make_status() -> SystemStatus:
 
 def make_tool_metadata() -> ToolMetadata:
     return ToolMetadata(
-        name="get_system_status",
+        tool_id="get_system_status",
         version="1.0.0",
+        contract_hash=CONTRACT_HASH,
+        implementation_hash=IMPLEMENTATION_HASH,
         description="Mock status.",
         risk_level=RiskLevel.L0,
-        timeout_seconds=1.0,
+        timeout_ms=1000,
         idempotent=True,
+        input_schema_id="urn:ai-server:tool:get-system-status:input-v1",
+        output_schema_id="urn:ai-server:tool:get-system-status:output-v1",
         input_model="GetSystemStatusArguments",
         output_model="SystemStatus",
+    )
+
+
+def make_result(
+    status: SystemStatus | None = None,
+    *,
+    duration_ms: int = 0,
+) -> ToolResult[SystemStatus]:
+    arguments = GetSystemStatusArguments()
+    return ToolResult[SystemStatus](
+        invocation_id=INVOCATION_ID,
+        plan_step_id="status",
+        tool_id="get_system_status",
+        tool_version="1.0.0",
+        contract_hash=CONTRACT_HASH,
+        arguments_hash=canonical_json_sha256(arguments),
+        target=TargetReference(
+            target_id=arguments.target,
+            resource_type="local_system",
+            resource_id=arguments.target,
+        ),
+        success=True,
+        data=status if status is not None else make_status(),
+        evidence={"source": "mock"},
+        error=None,
+        duration_ms=duration_ms,
     )
 
 
@@ -108,14 +145,24 @@ def test_task_rejects_invalid_or_extra_state_data(payload: dict[str, object]) ->
         Task.model_validate(payload)
 
 
-def test_execution_step_rejects_untyped_arguments_and_forged_risk() -> None:
+def test_execution_step_rejects_untyped_arguments_legacy_identity_and_forged_risk() -> None:
     payload = make_step().model_dump(mode="json")
     payload["arguments"] = {"target": "not-allowed"}
     with pytest.raises(ValidationError):
         ExecutionStep.model_validate(payload)
 
     payload = make_step().model_dump(mode="json")
+    payload["tool_name"] = "get_system_status"
+    with pytest.raises(ValidationError):
+        ExecutionStep.model_validate(payload)
+
+    payload = make_step().model_dump(mode="json")
     payload["risk_level"] = "L3"
+    with pytest.raises(ValidationError):
+        ExecutionStep.model_validate(payload)
+
+    payload = make_step().model_dump(mode="json")
+    payload["contract_hash"] = "not-a-hash"
     with pytest.raises(ValidationError):
         ExecutionStep.model_validate(payload)
 
@@ -130,24 +177,10 @@ def test_phase_zero_models_are_frozen() -> None:
     )
     step = make_step()
     arguments = GetSystemStatusArguments()
-    metadata = ToolMetadata(
-        name="get_system_status",
-        version="1.0.0",
-        description="Mock status.",
-        risk_level=RiskLevel.L0,
-        timeout_seconds=1.0,
-        idempotent=True,
-        input_model="GetSystemStatusArguments",
-        output_model="SystemStatus",
-    )
+    metadata = make_tool_metadata()
     plan = ExecutionPlan(task_id=task.task_id, target=task.target, steps=(step,))
     status = make_status()
-    result = ToolResult[SystemStatus](
-        tool_name="get_system_status",
-        tool_version="1.0.0",
-        data=status,
-        duration_ms=0,
-    )
+    result = make_result(status)
 
     assignments = (
         (task, "request", "changed"),
@@ -180,31 +213,19 @@ def test_execution_plan_requires_ordered_unique_steps() -> None:
 
 def test_tool_result_requires_typed_data_and_non_negative_duration() -> None:
     status = make_status()
-    result = ToolResult[SystemStatus](
-        tool_name="get_system_status",
-        tool_version="1.0.0",
-        data=status,
-        duration_ms=0,
-    )
+    result = make_result(status)
 
     assert ToolResult[SystemStatus].model_validate_json(result.model_dump_json()) == result
 
-    invalid_data = {
-        "tool_name": "get_system_status",
-        "tool_version": "1.0.0",
-        "success": True,
-        "data": "plain string",
-        "duration_ms": 0,
-    }
+    invalid_data = result.model_dump(mode="python")
+    invalid_data["data"] = "plain string"
     with pytest.raises(ValidationError):
         ToolResult[SystemStatus].model_validate(invalid_data)
+
+    negative_duration = result.model_dump(mode="python")
+    negative_duration["duration_ms"] = -1
     with pytest.raises(ValidationError):
-        ToolResult[SystemStatus](
-            tool_name="get_system_status",
-            tool_version="1.0.0",
-            data=status,
-            duration_ms=-1,
-        )
+        ToolResult[SystemStatus].model_validate(negative_duration)
 
 
 def test_valid_task_history_accepts_only_declared_edges() -> None:

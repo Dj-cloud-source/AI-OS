@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.27"]
+requires = ["hatchling>=1.27", "editables>=0.3"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "A local-first, policy-controlled runtime for server operations."
 requires-python = ">=3.12"
 dependencies = [
+    "jsonschema[format-nongpl]>=4.26,<5",
     "pydantic>=2.10,<3",
+    "rfc8785>=0.1.4,<0.2",
     "rich>=13.9,<15",
     "SQLAlchemy>=2.0,<3",
     "typer>=0.15,<1",
@@ -19,6 +21,7 @@ dev = [
     "mypy>=1.14,<2",
     "pytest>=8.3,<10",
     "ruff>=0.9,<1",
+    "types-jsonschema>=4.26,<5",
 ]
 
 [project.scripts]

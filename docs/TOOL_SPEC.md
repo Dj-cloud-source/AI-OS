@@ -2,7 +2,8 @@
 
 Version: MVP v1
 
-Status: Design only; no Tool may be registered from this prose alone
+Status: Phase 2 local Mock-only protocol implemented; this prose alone never
+registers a Tool
 
 ---
 
@@ -11,8 +12,10 @@ Status: Design only; no Tool may be registered from this prose alone
 A Tool is a small, typed capability exposed through the Tool Gateway.
 
 This specification defines the minimum contract that a Tool must satisfy before
-it can be registered. It does not authorize execution and does not describe a
-command pass-through interface.
+it can be registered. Phase 2 permits only the package-resident, reviewed,
+deterministic `get_system_status@1.0.0` Mock Tool to bootstrap as `registered`.
+It performs no real system I/O. This document does not authorize another Tool,
+production execution, or a command pass-through interface.
 
 A Tool:
 
@@ -24,6 +27,10 @@ A Tool:
 - can be tested and replayed without production access
 
 A Tool never plans, approves, changes Policy, or expands its own permissions.
+
+Phase 2 is synchronous and local. It contains no SSH, LLM/model adapter, shell,
+subprocess, Docker, Kubernetes, HTTP, database, network, credential, remote
+target, or mutating capability.
 
 ---
 
@@ -76,10 +83,9 @@ Every contract must define:
 Execution Plans must reference the exact `tool_id` and `version`.
 
 The pair `(tool_id, version)` is immutable. Any behavioral, implementation,
-schema, risk,
-redaction, target-scope, verification, or rollback change requires a new Tool
-version. A contract hash must be calculated from a canonical representation
-when it is registered.
+schema, risk, redaction, target-scope, verification, or rollback change requires
+a new Tool version. A Contract Hash must be calculated from the exact validated
+Contract artifact before registration.
 
 Mutable Registry Status is stored outside the immutable Contract. Only a Tool
 whose separate Registry Record has `status: registered` may be invoked. A
@@ -104,7 +110,7 @@ The machine-readable Tool contract must contain the following fields.
 | `side_effects` | Mutation class and whether the Tool changes remote state |
 | `target_scope` | Target type, selector schema, and scope restrictions |
 | `input_schema` | Strict input schema with unknown fields rejected |
-| `output_schema` | Structured success and failure result schema |
+| `output_schema` | Complete Gateway-owned ToolResult success/failure envelope Schema |
 | `redaction` | Fields and data classes that must never be recorded |
 | `errors` | Stable structured error codes |
 | `timeout_ms` | Maximum invocation duration |
@@ -121,41 +127,95 @@ explicitly defines them.
 
 # Normative Artifacts Required Before Registration
 
-This document defines design requirements, not the complete machine-readable
-meta-schema. Before any Tool can become `registered`, Phase 2 must add, review,
-and test versioned local artifacts equivalent to:
+The five normative package Schemas are:
 
 ```text
-schemas/tool-contract-v1.json
-schemas/tool-result-v1.json
-schemas/tool-replay-fixture-v1.json
-schemas/tool-registry-record-v1.json
-schemas/tool-implementation-bundle-v1.json
+src/ai_server/schemas/tool/tool-contract-v1.json
+src/ai_server/schemas/tool/tool-result-v1.json
+src/ai_server/schemas/tool/tool-replay-fixture-v1.json
+src/ai_server/schemas/tool/tool-registry-record-v1.json
+src/ai_server/schemas/tool/tool-implementation-bundle-v1.json
 ```
 
-The schemas must publish stable local `$id` values, use JSON Schema Draft
-2020-12, reject unknown fields, define every nested object and enum, and encode
-cross-field constraints where JSON Schema can express them. Deterministic
-Runtime validators must enforce remaining invariants.
+They are installed as package resources under `ai_server.schemas.tool`. All
+five must load together, publish their expected unique local `$id`, use JSON
+Schema Draft 2020-12, reject unknown fields, define nested objects and enums,
+and pass meta-schema validation. Deterministic Pydantic and Runtime validators
+enforce invariants that JSON Schema cannot express.
 
-Until all five schemas exist, every Tool and example remains `design_only` and
-must fail registration closed.
+Each exact Tool artifact set is package-resident at:
 
-Contract Hash is SHA-256 over UTF-8 RFC 8785 canonical JSON produced after
-strict schema validation. It excludes Registry Status and the Hash field itself.
-The Registry Record binds Tool ID, Version, Contract Hash, Implementation Hash,
-Status, Reviewer, and timestamps without rewriting the immutable Contract.
+```text
+src/ai_server/tool_artifacts/<tool_id>/<version>/
+├── contract.json
+├── registry-record.json
+├── implementation-bundle.json
+├── dependency-lock.json
+└── fixtures/
+    └── <fixture>.json
+```
+
+Missing package data, a missing Schema, an unexpected `$id`, or any artifact
+validation failure leaves the Tool unavailable.
+
+## Digest Encoding and Canonical Inputs
+
+Protocol identity fields use lowercase, unprefixed 64-character hexadecimal:
+
+- Contract Hash in Registry Records, Plans, ToolCalls, ToolResults, and replay
+  fixtures;
+- `implementation_hash` in Contracts and Registry Records;
+- canonical Arguments Hash;
+- replay fixture `content_hash`.
+
+File- and lock-level byte digests use lowercase
+`sha256:<64-character-hexadecimal>`:
+
+- `dependency_lock_sha256`;
+- every Implementation Bundle `files[].sha256`;
+- every dependency artifact `packages[].artifacts[].sha256`.
+
+The algorithms are:
+
+1. Contract Hash: parse `contract.json` as one JSON object; validate the raw
+   object against `tool-contract-v1`; encode that complete raw object as UTF-8
+   RFC 8785 canonical JSON; then apply SHA-256. `contract.json` has no
+   `contract_hash` field, and its `implementation_hash` is included.
+2. Implementation Hash: validate the complete
+   `implementation-bundle.json`; encode the entire manifest as UTF-8 RFC 8785
+   canonical JSON; then apply SHA-256. The manifest has no
+   `implementation_hash` or volatile timestamp field.
+3. Arguments Hash: materialize all schema defaults before Planning, Policy,
+   Approval, or hashing; encode the complete validated arguments object as
+   UTF-8 RFC 8785 canonical JSON; then apply SHA-256.
+4. Fixture Content Hash: parse and validate the fixture, remove only the root
+   `content_hash` member, encode the remaining object as UTF-8 RFC 8785
+   canonical JSON, then apply SHA-256.
+
+Contract and Implementation Hashes are returned as unprefixed lowercase
+digests. File and dependency-lock byte hashes retain the `sha256:` prefix.
+Serialization through a Pydantic model must not replace the raw JSON artifact
+as the Contract, Implementation, or Fixture hash input.
+
+The Registry Record stores mutable availability and review evidence separately.
+It binds Tool ID, Version, Contract Hash, Implementation Hash, status, reviewer,
+and UTC timestamps without rewriting the immutable Contract.
+
+## Implementation Bundle and Executable Binding
 
 `implementation_hash` is SHA-256 over a sealed
 `tool-implementation-bundle-v1` manifest, not over an arbitrary working
-directory. Its normative Schema requires exactly:
+directory. Its identity and binding fields are:
 
 ```json
 {
   "artifact_format": "tool-implementation-bundle-v1",
   "tool_id": "stable-tool-id",
   "version": "1.0.0",
-  "runtime_abi": "python-3.12",
+  "runtime_abi": "python-source-v1.requires-python-ge-3.12",
+  "handler_entry_point": "ai_server.tools.example:ExampleTool.invoke",
+  "input_model_entry_point": "ai_server.models.example:ExampleArguments",
+  "output_model_entry_point": "ai_server.models.example:ExamplePayload",
   "dependency_lock_sha256": "sha256:<lowercase-hex>",
   "files": [
     {
@@ -167,14 +227,55 @@ directory. Its normative Schema requires exactly:
 }
 ```
 
-All fields shown are required Hash inputs; unknown fields are rejected.
-`files` contains only files the Tool loads and is sorted lexicographically by
-normalized POSIX `path`. The manifest contains no timestamps, absolute paths,
-caches, symlinks, or Hash field. Undeclared files, path traversal, duplicate
-paths, and mutable external code are rejected. The final
-`implementation_hash` is SHA-256 over the UTF-8 RFC 8785 canonical JSON
-manifest. Registration must prove that the installed executable bundle
-recomputes to the same Hash.
+All fields shown are required Hash inputs; unknown fields are rejected. Entry
+points use `module:qualified.name`. At startup, the qualified entry points
+derived from the bound Python handler, input model, and output model must
+exactly match the manifest. Registry then resolves each reviewed entry point
+from the installed package and requires exact Python object identity for both
+models and the handler function. A bound method must also be bound to an
+instance whose exact type is the reviewed owner class. Caller-controlled
+`__module__` or `__qualname__` strings are never sufficient authority. Each
+entry point's module source file must also appear in `files`. A caller-supplied
+object cannot select or impersonate a different reviewed handler or model.
+
+`files` is sorted lexicographically by normalized package-relative POSIX path.
+Each entry binds the installed package file's exact byte size and prefixed
+SHA-256 digest. The manifest contains no timestamps, absolute paths, caches,
+symlinks, or Hash field. Undeclared entry-point files, path traversal, duplicate
+paths, symlinks, missing files, byte drift, and mutable external code are
+rejected.
+
+## Reviewed Dependency Lock
+
+Every Phase 2 Tool artifact set contains `dependency-lock.json`. Its
+`format` is exactly `uv-tool-lock-v1`, its `requires_python` is exactly
+`>=3.12`, and its top-level fields are exactly:
+
+```text
+format
+source_lock
+requires_python
+roots
+packages
+```
+
+`source_lock` records positive `format_version` and `revision` integers from
+the repository-local `uv` lock source. `roots` is a non-empty sorted unique
+list. `packages` is a sorted unique dependency closure by name and version.
+Every dependency name must exist in that closure. Phase 2 accepts only the
+reviewed PyPI simple-index identity and `files.pythonhosted.org` artifact URLs;
+each listed artifact binds an exact filename, positive byte size, and prefixed
+SHA-256 digest. This lock is registration evidence only: Runtime never
+downloads or installs dependencies while registering or invoking a Tool.
+
+The Implementation Bundle binds the exact raw `dependency-lock.json` bytes in
+both `dependency_lock_sha256` and its declared `files` entry. Any lock drift
+invalidates the Implementation Hash and registration. The only accepted Phase
+2 runtime ABI is:
+
+```text
+python-source-v1.requires-python-ge-3.12
+```
 
 ---
 
@@ -244,6 +345,25 @@ Tools receive validated values, not free-form instructions.
 Target expansion is forbidden. A Tool must operate only on the target resolved
 from its approved arguments and declared target scope.
 
+`target_scope.selector_field` must name a required property in
+`input_schema`. Executor, not Planner, the Tool, or Gateway, deterministically
+constructs the `TargetReference` from the already validated and approved Plan.
+For the Phase 2 single-target Mock protocol:
+
+- `TargetReference.resource_type` must equal the registered
+  `target_scope.resource_type`;
+- the validated selector value must be a string;
+- `TargetReference.target_id` and `TargetReference.resource_id` must both equal
+  that selector value;
+- `maximum_targets` must be `1`;
+- Gateway performs no remote lookup or target discovery.
+
+Any mismatch produces a structured `target_not_allowed` failure after exact
+Tool resolution and before handler dispatch. That failure preserves the
+strictly typed attempted Target Reference for audit; the exact Contract output
+Schema therefore accepts a structurally valid Target Reference on failure but
+requires the registered allowed Target on success.
+
 Canonical Arguments Hash is:
 
 ```text
@@ -263,37 +383,101 @@ equivalent to the object bound by the Plan and this Hash.
 
 # Output and Error Contract
 
-Every invocation returns a structured object for both success and failure.
-Plain strings are forbidden.
+The handler boundary and result boundary are intentionally different:
 
-The result must identify:
+1. A Tool handler receives one already validated typed arguments model.
+2. The handler returns only one typed Tool-specific `data` payload model.
+3. The handler does not return Invocation ID, Plan Step ID, hashes, Target,
+   success, evidence, error, or duration.
+4. Gateway validates the payload model, creates the complete ToolResult
+   envelope, derives safe evidence, and validates the final object.
 
-- `invocation_id` and `plan_step_id`
-- `tool_id`
-- `tool_version`
-- Contract Hash and canonical Arguments Hash
-- structured opaque Target Reference
-- success status
-- bounded execution duration
-- structured evidence
-- structured error, when present
+The global `tool-result-v1` Schema and every Contract `output_schema` both
+describe the complete ToolResult envelope, not only `data`. The Contract Schema
+may narrow Tool identity, payload, evidence, target, duration, and allowed
+errors, but it must contain exactly these top-level fields:
 
-Errors must contain a stable code, category, sanitized message, and retry
-classification. They must not expose raw remote output, stack traces,
-credentials, Secrets, or unrelated target data.
+```text
+invocation_id
+plan_step_id
+tool_id
+tool_version
+contract_hash
+arguments_hash
+target
+success
+data
+evidence
+error
+duration_ms
+```
 
-For every result, `success: true` requires `error: null`, and `success: false`
-requires a structured non-null `error`.
+Gateway validates the complete result first against the global Result Schema
+and then against the exact registered Contract output Schema. Runtime and
+Executor also reject any result identity that differs from the approved
+ToolCall.
 
-Tool Gateway, not the model or Tool text, supplies and validates the trusted
-result envelope: Invocation ID, Plan Step ID, Contract Hash, canonical Arguments
-Hash, and structured Target Reference. Runtime rejects a result that does not
-match the approved invocation. It also deterministically checks
-`duration_ms <= timeout_ms`; this cross-document invariant is not delegated to
-model output.
+For every structured result:
 
-Unknown failures must map to a safe generic structured error. They must not
-silently become success.
+- `success: true` requires typed non-null `data` and `error: null`;
+- `success: false` requires `data: null`, empty evidence, and one non-null
+  structured error;
+- `duration_ms` is a non-negative integer no greater than the registered
+  timeout;
+- plain strings, raw exceptions, stack traces, callbacks, transport objects,
+  credentials, Secrets, and unrelated target data are forbidden.
+
+Every error contains a stable code, category, contract-supplied sanitized
+message, and retry classification. The eight Phase 2 Gateway invocation
+failures are:
+
+```text
+arguments_hash_mismatch
+gateway_clock_failed
+invalid_arguments
+malformed_tool_output
+result_redaction_failed
+target_not_allowed
+tool_execution_failed
+tool_timeout
+```
+
+Every registered Contract must declare all eight with the required category and
+`retryable: false`, and its output Schema must accept a full failure envelope
+for each. A Contract may add bounded Tool-specific errors. Gateway never
+accepts a Tool-provided error message as trusted envelope content.
+
+## Exception Versus ToolResult Boundary
+
+A ToolResult is created only after Gateway has established a trustworthy exact
+registered Tool identity and verified the ToolCall's Contract and
+Implementation Hashes.
+
+| Failure boundary | Representation | Handler dispatch |
+| --- | --- | --- |
+| Invalid Gateway construction | Sanitized `invalid_gateway_configuration` exception | Zero |
+| Malformed or untrusted ToolCall | Sanitized `invalid_tool_call` exception | Zero |
+| Unknown Tool or unsafe Registry resolution | Sanitized `tool_resolution` exception | Zero |
+| Contract or Implementation Hash mismatch | Sanitized `tool_integrity` exception | Zero |
+| Valid exact identity followed by arguments, target, hash, clock, handler, timeout, output, or redaction failure | Structured ToolResult using a declared Gateway error | At most one; pre-dispatch checks remain zero |
+
+These exceptions carry stable codes and generic sanitized messages only.
+Executor catches them and converts them into its explicit Runtime domain
+failure; Gateway does not fabricate a result envelope from an untrusted call.
+No boundary failure may silently become success or authorize a retry.
+
+## Phase 2 Synchronous Timeout
+
+Phase 2 invokes only the deterministic local Mock handler synchronously. Gateway
+uses a monotonic nanosecond clock around the handler call. It compares raw
+elapsed nanoseconds with `timeout_ms`; an overrun produces `tool_timeout` and
+takes precedence over a handler exception. Public failure duration remains
+bounded by the registered timeout.
+
+This is a post-return elapsed-time check. It does not interrupt, cancel, kill,
+isolate, or preempt a running handler and is not a network or transport
+timeout. Phase 2 has no automatic retry. Real cancellation and transport
+timeouts require a later approved execution design.
 
 ---
 
@@ -327,15 +511,50 @@ The contract must declare:
 
 - a versioned central Redaction Profile reference
 - input fields that must never be logged
-- output fields that must be removed or summarized
+- output fields that must not be retained
 - evidence fields that are safe to persist
 - maximum retained payload size
 
-Logs, Tool Results, fixtures, Incident Memory, and Evolution inputs must use the
-same redaction rules. Failure to redact causes the Tool Result to fail closed
-and prevents the unsafe payload from entering replay or Memory. Unsafe raw data
-must be discarded through the approved local handling path and must not appear
-in debug logs or exception messages.
+In MVP v1, `input_fields`, `output_fields`, and `safe_evidence_fields` contain
+top-level property names only. Dotted paths do not mean nested traversal.
+Nested field-path redaction requires a later versioned Redaction Profile and
+Schema change. The generic forbidden-key and forbidden-marker scan remains
+recursive. Artifact validation and Gateway use the same centrally defined
+forbidden key and executable-marker set, comparing string markers
+case-insensitively so the two safety boundaries cannot silently diverge.
+
+Gateway applies the Phase 2 output boundary in this exact order:
+
+1. require the handler return value to be the exact registered payload model;
+2. strictly reconstruct and serialize that payload to a JSON object;
+3. reject the payload if any declared top-level `output_fields` property is
+   present;
+4. recursively scan keys and string values for forbidden Secret or executable
+   markers;
+5. RFC 8785-canonicalize the complete validated payload and reject it when its
+   byte length exceeds `max_retained_payload_bytes`;
+6. construct `evidence` by selecting only present top-level
+   `safe_evidence_fields`;
+7. construct the Gateway-owned ToolResult envelope;
+8. validate that full envelope against the global Tool Result Schema and exact
+   Contract output Schema;
+9. only then return or retain the structured result.
+
+Phase 2 does not transform or partially preserve a payload that contains a
+declared output field or forbidden content. It discards that payload and
+returns a safe `result_redaction_failed` ToolResult with `data: null` and empty
+evidence. The maximum byte limit applies to the complete validated payload
+before envelope construction, not only to the evidence projection.
+
+Declared top-level `input_fields` are prohibited from logs, diagnostics, and
+persisted invocation summaries. Phase 2 audit events retain only the constant
+`{"redacted": true}` marker in the `arguments` field and emit no raw Tool
+argument values. A future logging phase must apply the same profile before
+retaining any safe argument projection.
+
+Tool Results, fixtures, Incident Memory, and Evolution inputs must use the same
+versioned redaction rules. Unsafe raw data must not appear in debug logs,
+exception messages, replay, or Memory.
 
 ---
 
@@ -397,6 +616,7 @@ Historical Replay.
 
 A replay fixture contains:
 
+- exact `fixture_id` bound to a normalized package-relative Contract reference
 - exact `tool_id` and `version`
 - sanitized input
 - canonical Arguments Hash and invocation sequence position
@@ -407,7 +627,30 @@ A replay fixture contains:
 - fixture schema version and content hash
 - Redaction Policy Version and sanitized redaction report
 
-Replay:
+At registration, every referenced fixture is loaded as package data and
+validated in this order:
+
+1. validate the complete fixture against
+   `tool-replay-fixture-v1`;
+2. match the Contract reference's `fixture_id` and reject duplicate IDs;
+3. remove only the root `content_hash`, RFC 8785-canonicalize the remaining
+   object, apply SHA-256, and compare the unprefixed lowercase digest;
+4. recompute the Arguments Hash from `input`;
+5. match Tool ID, Version, Contract Hash, Arguments Hash, structured Target,
+   timeout bound, expected outcome, and expected error;
+6. validate `input` against the exact Contract input Schema and the complete
+   `result` against both global and exact Contract output Schemas;
+7. require matching Redaction Profile Version and `sanitized: true`;
+8. require successful structured Verification evidence when the Contract says
+   Verification is required;
+9. recursively reject Secret and executable markers;
+10. require fixture sequence positions to be unique and ascending.
+
+Registration also constructs a safe failure envelope for every declared
+Contract error and proves that both result Schemas accept it. This prevents a
+failure path from becoming unrepresentable only after dispatch.
+
+Phase 2 Mock replay:
 
 - never opens SSH, Docker, HTTP, database, or other production connections
 - runs with external network access technically disabled
@@ -419,6 +662,8 @@ Replay:
 - records Redaction Policy Version and a sanitized redaction report
 
 Replay success is evaluation evidence. It is not production authorization.
+Phase 2 implements artifact and fixture validation, not production Historical
+Replay or traffic simulation.
 
 ---
 
@@ -426,11 +671,15 @@ Replay success is evaluation evidence. It is not production authorization.
 
 A Tool may become `registered` only after:
 
-- normative Contract, Result, Fixture, and Registry Record schemas exist
+- all five normative Contract, Result, Fixture, Registry Record, and
+  Implementation Bundle Schemas load from the installed package
 - strict contract-schema validation
 - unique identity and version validation
 - Contract Hash and Implementation Hash binding
-- Tool implementation review
+- reviewed handler, input model, and output model entry points exactly match the
+  Implementation Bundle and declared package files
+- runtime ABI, dependency-lock byte hash, dependency closure, installed-file
+  byte size, and installed-file digest validation
 - input and output schema tests
 - Policy tests for its authoritative risk level
 - target-scope and side-effect tests
@@ -439,241 +688,131 @@ A Tool may become `registered` only after:
 - Mock and sanitized replay tests
 - verification and rollback review
 - arbitrary Shell and executable-payload scanning
-- explicit human registration
+- a package-resident reviewed bootstrap Registry Record
+- source distribution, wheel package-resource, and clean local install tests
 
 Any failed gate leaves the Tool unavailable to Planner, Policy, Executor,
 Skills, and production retrieval.
 
+## Phase 2 Reviewed Bootstrap Record
+
+Phase 2 does not implement a mutable registry database, approval CLI, reviewer
+authentication, or production activation workflow. It accepts only a
+package-resident bootstrap `registry-record.json` reviewed as repository
+content. The Mock bootstrap validator requires:
+
+- exact Tool ID and Version;
+- exact unprefixed Contract and Implementation Hashes;
+- `status: registered`;
+- `reviewer: local-owner`;
+- timezone-aware UTC `reviewed_at` and `registered_at`;
+- exact binding to the immutable Contract and Implementation Bundle.
+
+Runtime cannot create, edit, approve, or upgrade this record. Registration is
+explicit at process startup; all artifact gates run before insertion. Duplicate
+identity fails. Registry must then be frozen before Policy metadata lookup or
+Gateway resolution; mutation after freeze fails.
+
+This bootstrap record authorizes only availability of the local deterministic
+Mock capability. It is not Execution Approval and cannot authorize remote or
+mutating behavior. A general human Tool-review and status-transition workflow
+requires a later architecture phase or RFC.
+
 ---
 
-# Design Example: `restart_service`
+# Registered Phase 2 Example: `get_system_status`
 
-The following YAML is a design example. It is not a registered Tool and must
-not connect to a server. It may become executable only after a future
-implementation satisfies every registration gate.
+The only Phase 2 bootstrap Tool is
+`get_system_status@1.0.0`. Its complete machine-readable artifacts are:
 
-A separate Registry Record would mark this example `design_only`; that mutable
-record is not part of the YAML below. `implementation_hash: null` intentionally
-makes this design-only example impossible to register.
-
-```yaml
-contract_schema_version: "1"
-schema_dialect: "https://json-schema.org/draft/2020-12/schema"
-tool_id: restart_service
-version: 1.0.0
-implementation_hash: null
-description: Restart one allowlisted systemd service.
-
-risk_level: L2
-approval:
-  derived_from_risk_level: true
-  implication: explicit_human_approval
-  binds:
-    - plan_hash
-    - arguments
-    - expiration
-
-side_effects:
-  mutates_remote_state: true
-  kind: service_state_change
-
-target_scope:
-  resource_type: systemd_service
-  maximum_targets: 1
-  selector_field: service_name
-
-input_schema:
-  type: object
-  additionalProperties: false
-  required:
-    - service_name
-  properties:
-    service_name:
-      type: string
-      minLength: 1
-      maxLength: 128
-      pattern: "^[A-Za-z0-9][A-Za-z0-9_.@-]*$"
-
-output_schema:
-  type: object
-  additionalProperties: false
-  required:
-    - invocation_id
-    - plan_step_id
-    - tool_id
-    - tool_version
-    - contract_hash
-    - arguments_hash
-    - target
-    - success
-    - previous_state
-    - observed_state
-    - duration_ms
-    - evidence
-    - error
-  properties:
-    invocation_id:
-      type: string
-      format: uuid
-    plan_step_id:
-      type: string
-      minLength: 1
-      maxLength: 128
-    tool_id:
-      const: restart_service
-    tool_version:
-      const: 1.0.0
-    contract_hash:
-      type: string
-      pattern: "^[a-f0-9]{64}$"
-    arguments_hash:
-      type: string
-      pattern: "^[a-f0-9]{64}$"
-    target:
-      type: object
-      additionalProperties: false
-      required:
-        - target_id
-        - resource_type
-        - resource_id
-      properties:
-        target_id:
-          type: string
-          minLength: 1
-          maxLength: 128
-        resource_type:
-          const: systemd_service
-        resource_id:
-          type: string
-          minLength: 1
-          maxLength: 128
-    success:
-      type: boolean
-    previous_state:
-      enum: [active, inactive, failed, unknown]
-    observed_state:
-      enum: [active, inactive, failed, unknown]
-    duration_ms:
-      type: integer
-      minimum: 0
-    evidence:
-      type: object
-      additionalProperties: false
-      required:
-        - transition_observed
-      properties:
-        transition_observed:
-          type: boolean
-    error:
-      oneOf:
-        - type: "null"
-        - type: object
-          additionalProperties: false
-          required:
-            - code
-            - category
-            - message
-            - retryable
-          properties:
-            code:
-              enum:
-                - target_not_allowed
-                - service_not_found
-                - operation_timeout
-                - operation_failed
-                - result_redaction_failed
-            category:
-              enum:
-                - policy_boundary
-                - target
-                - timeout
-                - execution
-                - safety
-            message:
-              type: string
-              maxLength: 256
-            retryable:
-              const: false
-  allOf:
-    - if:
-        properties:
-          success:
-            const: true
-        required:
-          - success
-      then:
-        properties:
-          error:
-            type: "null"
-      else:
-        properties:
-          error:
-            type: object
-
-redaction:
-  profile_ref: tool-redaction-default@1
-  never_record:
-    - credentials
-    - private_keys
-    - passwords
-    - tokens
-    - raw_environment
-  persist_allowlist:
-    - target
-    - success
-    - previous_state
-    - observed_state
-    - duration_ms
-    - evidence.transition_observed
-    - error.code
-    - error.category
-    - error.retryable
-  maximum_persisted_payload_bytes: 16384
-
-errors:
-  - code: target_not_allowed
-    category: policy_boundary
-    retryable: false
-  - code: service_not_found
-    category: target
-    retryable: false
-  - code: operation_timeout
-    category: timeout
-    retryable: false
-  - code: operation_failed
-    category: execution
-    retryable: false
-  - code: result_redaction_failed
-    category: safety
-    retryable: false
-
-timeout_ms: 30000
-idempotent: false
-automatic_retry: forbidden
-
-verification:
-  required: true
-  tool_ref: get_service_status@1.0.0
-  expected:
-    state: active
-
-rollback:
-  available: false
-  reason: A completed restart cannot be undone.
-  recovery_if_verification_fails:
-    separate_plan_required: true
-    policy_recheck_required: true
-    manual_intervention_if_no_registered_recovery_tool: true
-
-replay_fixtures:
-  - fixtures/restart_service/success.mock.yaml
-  - fixtures/restart_service/timeout.mock.yaml
-  - fixtures/restart_service/target-not-allowed.mock.yaml
+```text
+src/ai_server/tool_artifacts/get_system_status/1.0.0/contract.json
+src/ai_server/tool_artifacts/get_system_status/1.0.0/registry-record.json
+src/ai_server/tool_artifacts/get_system_status/1.0.0/implementation-bundle.json
+src/ai_server/tool_artifacts/get_system_status/1.0.0/dependency-lock.json
+src/ai_server/tool_artifacts/get_system_status/1.0.0/fixtures/success.mock.json
 ```
 
-The referenced verification Tool and replay fixture paths are also design-only
-until separately registered and created. Their appearance in this example does
-not imply that they exist.
+Its immutable properties are:
+
+| Property | Value |
+| --- | --- |
+| Tool identity | `get_system_status@1.0.0` |
+| Risk | `L0`, derived approval implication `automatic_execution` |
+| Side effects | `mutates_remote_state: false`, kind `none` |
+| Target | one `local_system` selected by required argument `target` |
+| Allowed selector | exactly `local-mock` |
+| Timeout | 1000 ms, synchronous post-return measurement |
+| Automatic retry | `false` |
+| Verification | required structured Mock evidence; no verification Tool call |
+| Rollback | not required |
+| Runtime ABI | `python-source-v1.requires-python-ge-3.12` |
+| Handler entry point | `ai_server.tools.get_system_status:GetSystemStatusTool.invoke` |
+| Input model entry point | `ai_server.models.system_status:GetSystemStatusArguments` |
+| Output payload model entry point | `ai_server.models.system_status:SystemStatus` |
+
+Executor creates the typed arguments and Target Reference:
+
+```json
+{
+  "arguments": {
+    "target": "local-mock"
+  },
+  "target": {
+    "target_id": "local-mock",
+    "resource_type": "local_system",
+    "resource_id": "local-mock"
+  }
+}
+```
+
+The handler returns only deterministic simulated payload data. Gateway wraps it
+as a complete result such as the reviewed Mock fixture:
+
+```json
+{
+  "invocation_id": "00000000-0000-4000-8000-000000000001",
+  "plan_step_id": "observe_status",
+  "tool_id": "get_system_status",
+  "tool_version": "1.0.0",
+  "contract_hash": "90e2295d172ba8188d986e4aee9ce9665a8b8e2d6694b8ef4015ef711d820a94",
+  "arguments_hash": "5b2b197431ad05295ca97b9dab0e2638a389f2f1d4c2d2c32c7d12409c98dcd0",
+  "target": {
+    "target_id": "local-mock",
+    "resource_type": "local_system",
+    "resource_id": "local-mock"
+  },
+  "success": true,
+  "data": {
+    "source": "mock",
+    "simulated": true,
+    "target": "local-mock",
+    "hostname": "mock-server",
+    "cpu_percent": 12.5,
+    "memory_percent": 34.0,
+    "disk_percent": 45.5,
+    "services": [
+      {
+        "name": "mock-api",
+        "state": "running"
+      }
+    ]
+  },
+  "evidence": {
+    "source": "mock",
+    "simulated": true,
+    "target": "local-mock",
+    "hostname": "mock-server"
+  },
+  "error": null,
+  "duration_ms": 0
+}
+```
+
+The artifact, not this duplicated example, is authoritative. Contract or
+fixture edits change their hashes and require the Registry Record and all bound
+Plans to be regenerated and reviewed. This Tool reads no host state and cannot
+be changed into a real status probe under the same version.
 
 ---
 
@@ -699,36 +838,59 @@ automatic dangerous retry, or fallback to arbitrary Shell.
 
 This specification is satisfied when:
 
-- normative Contract, Result, Fixture, and Registry Record schemas exist
-- every registered Tool has an immutable exact identity and contract hash
-- Registry binds the reviewed Implementation Hash without mutating the Contract
+- all five normative Contract, Result, Replay Fixture, Registry Record, and
+  Implementation Bundle Schemas load from the installed package
+- every registered Tool has an immutable exact identity, unprefixed Contract
+  Hash, and unprefixed Implementation Hash
+- Registry derives Metadata from the validated artifact set and binds the
+  reviewed Implementation Hash without mutating the Contract
+- manifest entry points, runtime ABI, dependency lock, and installed package
+  files all match their reviewed bindings
+- Registry resolves only after startup freeze and exposes no public handler
 - input, output, errors, side effects, target scope, and redaction are
   machine-validated
+- Executor deterministically constructs the Target Reference and Gateway rejects
+  target expansion before dispatch
 - Policy obtains risk only from exact registered Tool metadata
 - L2 and L3 approval implications are enforced consistently
 - approval is bound to exact Plan Hash, Arguments, and Expiration
-- all results and errors are structured and sanitized
+- the handler returns payload data only, while Gateway owns and validates the
+  complete ToolResult envelope
+- pre-trust Gateway failures are explicit sanitized exceptions with zero
+  dispatch, and post-resolution invocation failures are structured ToolResults
+- all results and errors are structured, bounded, and sanitized in the
+  specified order
+- Phase 2 timeout is documented and tested as a synchronous post-return
+  elapsed-time check without cancellation or retry
 - Verification and rollback remain explicit and independently governed
 - Verifier consumes Runtime-provided results and never invokes Tool
 - replay uses only sanitized recorded data, Mock Tools, or local fixtures
-- replay cannot connect to production
+- Fixture Hash removes only root `content_hash` before RFC 8785 and SHA-256
+- replay cannot invoke a production Tool or connect to production
 - arbitrary Shell and executable payloads are rejected
-- design-only examples cannot be invoked
+- only the reviewed package-resident `get_system_status@1.0.0` Mock bootstrap
+  record can register in Phase 2
+- design-only, disabled, deprecated, unknown, duplicate, or drifted Tools cannot
+  be invoked
 
 ---
 
 # Out of Scope
 
-This document does not implement:
+Phase 2 explicitly excludes:
 
-- Tool code
-- SSH, Docker, Kubernetes, HTTP, or database connections
-- production registration
-- Executor behavior
-- Policy code
-- Approval code
-- Verifier code
-- replay infrastructure
+- any real status collection or Tool other than the deterministic local Mock
+- SSH, Docker, Kubernetes, HTTP, database, filesystem, subprocess, shell,
+  network, credential, remote-target, or mutating operations
+- restart service, restart container, deletion, and configuration change
+- LLM or model adapters
+- dynamic Tool discovery, plugins, arbitrary user Tool installation, or
+  runtime artifact download
+- mutable Registry persistence, registration CLI, reviewer authentication,
+  online status transitions, or production activation
+- preemptive cancellation, process isolation, real transport timeout, or
+  automatic retry
+- production Historical Replay or traffic simulation
 - Skill Registry
 - Evolution Engine
 - arbitrary command templates

@@ -1,0 +1,68 @@
+{
+  "fixture_schema_version": "1",
+  "fixture_id": "get-system-status-success",
+  "content_hash": "cbe2ccbca7a7345f9c09433e19037d1a5fd49bd14275c0e0c2d8563fd1a006c3",
+  "tool_id": "get_system_status",
+  "version": "1.0.0",
+  "provenance": "mock",
+  "sequence_position": 0,
+  "input": {
+    "target": "local-mock"
+  },
+  "arguments_hash": "5b2b197431ad05295ca97b9dab0e2638a389f2f1d4c2d2c32c7d12409c98dcd0",
+  "result": {
+    "invocation_id": "00000000-0000-4000-8000-000000000001",
+    "plan_step_id": "observe_status",
+    "tool_id": "get_system_status",
+    "tool_version": "1.0.0",
+    "contract_hash": "90e2295d172ba8188d986e4aee9ce9665a8b8e2d6694b8ef4015ef711d820a94",
+    "arguments_hash": "5b2b197431ad05295ca97b9dab0e2638a389f2f1d4c2d2c32c7d12409c98dcd0",
+    "target": {
+      "target_id": "local-mock",
+      "resource_type": "local_system",
+      "resource_id": "local-mock"
+    },
+    "success": true,
+    "data": {
+      "source": "mock",
+      "simulated": true,
+      "target": "local-mock",
+      "hostname": "mock-server",
+      "cpu_percent": 12.5,
+      "memory_percent": 34.0,
+      "disk_percent": 45.5,
+      "services": [
+        {
+          "name": "mock-api",
+          "state": "running"
+        }
+      ]
+    },
+    "evidence": {
+      "source": "mock",
+      "simulated": true,
+      "target": "local-mock",
+      "hostname": "mock-server"
+    },
+    "error": null,
+    "duration_ms": 0
+  },
+  "verification_result": {
+    "success": true,
+    "criteria": [
+      "Payload is explicitly simulated and bound to local-mock."
+    ],
+    "evidence": {
+      "simulated": true,
+      "target": "local-mock"
+    },
+    "failure_reason": null
+  },
+  "expected_outcome": "success",
+  "expected_error_code": null,
+  "redaction": {
+    "profile_version": "1.0.0",
+    "sanitized": true,
+    "removed_data_classes": []
+  }
+}

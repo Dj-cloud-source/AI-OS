@@ -1,16 +1,23 @@
 # AIOps Agent Runtime Roadmap
 
-Status: Phases 0–1 baselines implemented; approval-gate conformance remediation
-and Phases 2–11 planned
+Status: Phases 0–2 and Approval Gate conformance implemented; Phases 3–11
+planned
 
 This roadmap defines the implementation order for the local-first AIOps Agent
 Runtime. It is subordinate to `docs/VISION.md`, `docs/PHILOSOPHY.md`,
 `docs/ARCHITECTURE.md`, `docs/STATE_MACHINE.md`, `docs/TOOL_SPEC.md`, and
 `AGENTS.md`.
 
-Phases 0–1 contain only the approved local Mock Runtime and its fail-closed
-lifecycle. Phases 2–11 remain planned; no SSH, model, database, container, or
-real server capability is enabled by the current implementation.
+Phases 0–2 contain only the approved local Mock Runtime and its fail-closed
+lifecycle. Phase 2 is local, artifact-driven, Mock-only, and has passed its
+registration and build gates. No SSH, model, database, container, shell,
+network, or real server capability is enabled by the current implementation.
+
+Approval Gate conformance means that every Policy-allowed Plan passes through
+`WAITING_FOR_APPROVAL`, `NOT_REQUIRED` is recorded, human-approval-required
+work pauses without dispatch, and direct bypass is rejected. It does not mean
+that Phase 4 approval issuance, persistence, resumption, or L3 confirmation is
+implemented.
 
 ## Fixed architecture decisions
 
@@ -73,7 +80,8 @@ in Phase 10.
 
 ## Phase 0 — Foundation
 
-Status: Baseline implemented (2026-07-25); approval-gate conformance pending
+Status: Implemented (2026-07-25); Approval Gate conformance completed
+(2026-07-26)
 
 ### Goal
 
@@ -117,7 +125,8 @@ server mutation, Web UI, multi-user, multi-agent, and cloud features.
 
 ## Phase 1 — Runtime
 
-Status: Baseline implemented (2026-07-25); approval-gate conformance pending
+Status: Implemented (2026-07-25); Approval Gate conformance completed
+(2026-07-26)
 
 ### Goal
 
@@ -164,42 +173,101 @@ and concurrent execution.
 
 ## Phase 2 — Tool Protocol
 
+Status: Implemented (2026-07-29); only the reviewed local
+`get_system_status@1.0.0` Mock artifact is registered
+
 ### Goal
 
-Define the single typed and auditable boundary for operational capabilities.
+Define the single typed, artifact-driven, and auditable boundary for
+operational capabilities without enabling any real system access.
 
 ### Inputs
 
-Phase 1 Runtime contracts, core models, and the L0 Mock Tool.
+The completed Phase 1 Runtime and Approval Gate contracts, core models, the L0
+`get_system_status` Mock Tool, and the Tool requirements in
+`docs/TOOL_SPEC.md`.
 
 ### Outputs
 
-Validated Tool Metadata, arguments, structured results, structured errors, and
-a deterministic Tool Gateway.
+Five versioned local JSON Schemas; immutable Contract, Registry Record,
+Implementation Bundle, ToolCall, ToolResult, and ToolError models; an
+artifact-driven Registry; a deterministic Tool Gateway; and sanitized
+Mock-replay evidence.
 
 ### Deliverables
 
-The minimal Tool protocol, Tool Metadata schema, immutable RiskLevel,
-ToolResult envelope, error codes, timeout metadata, and explicit registration.
+- JSON Schema Draft 2020-12 artifacts for Tool Contract, Tool Result, Replay
+  Fixture, Registry Record, and Implementation Bundle.
+- A package-resident reviewed artifact set for each exact Tool version:
+  immutable Contract, separate Registry Record, implementation manifest,
+  dependency-lock evidence, and sanitized fixtures.
+- RFC 8785 canonical JSON plus SHA-256 Contract, Implementation, Arguments, and
+  Fixture hashing with explicit hash-field exclusions.
+- An explicit startup Registry that derives the authoritative immutable
+  Tool Metadata from validated artifacts, verifies installed-file and
+  dependency-lock digests, rejects duplicates, and freezes before resolution.
+- A Gateway callable only by Executor that resolves exact versions, validates
+  ToolCall identity and hashes, validates input before dispatch and the complete
+  Gateway-owned ToolResult after return, enforces target scope, timeout,
+  redaction, and retained-size limits, and maps failures to stable structured
+  errors.
+- Migration of `get_system_status` to a typed payload-only Mock handler. The
+  Gateway, not the Mock Tool, owns trusted invocation and result-envelope
+  fields.
+- Sanitized local replay that reads fixtures or Mock results and never invokes
+  a production Tool implementation.
+- A repository-local `uv.lock` and local-only lock, source-distribution, wheel,
+  package-resource, and clean-install build gates.
 
 ### Acceptance Criteria
 
-Arguments are validated before dispatch. Unknown Tools are rejected. Planner
-cannot supply or override risk. A Tool never returns a top-level free string,
-plans, makes policy decisions, or exposes a raw command interface. Tool Gateway
-only registers, resolves, and validates Tools; it does not perform Policy,
-Approval, or planning.
+- Registration fails closed unless all five normative Schemas and every
+  required package artifact validate and all exact identity, status, hash,
+  installed-file, dependency-lock, fixture, ABI, and model bindings agree.
+- Contract Hash and Implementation Hash are recomputed from the schema-validated
+  raw JSON artifacts using UTF-8 RFC 8785 canonical JSON and SHA-256; Registry
+  status remains outside the immutable Contract.
+- RiskLevel and other authoritative Metadata are derived from the exact
+  registered Contract. Planner, caller arguments, Tool code, replay data, and
+  Runtime text cannot supply or override them.
+- The frozen Registry resolves only an exact registered `(tool_id, version)`;
+  unknown, disabled, duplicate, unreviewed, malformed, or hash-drifted Tools
+  are unavailable.
+- The Gateway accepts only a strict hash-bound ToolCall, materializes no hidden
+  post-approval arguments, validates arguments with both typed models and the
+  registered Schema, and rejects target expansion before dispatch.
+- The handler returns only a typed payload. The Gateway creates and validates
+  the complete structured ToolResult envelope against the global Result Schema
+  and exact Contract output Schema. No Tool returns a top-level free string.
+- Only Executor may invoke the Gateway. The Registry and Gateway do not plan,
+  decide Policy or Approval, infer risk, retry, or expose handler, transport,
+  callback, or raw command interfaces.
+- Replay uses only sanitized package fixtures, recorded Tool Results, or Mock
+  Tools with production connections disabled; it verifies exact identity,
+  hashes, schemas, sequence, expected outcome, and redaction evidence.
+- The checked-in local dependency lock is current. Local source and wheel
+  builds contain all five Schemas and required Tool artifacts, and a clean
+  local installation passes package-resource, import, CLI, and Mock Runtime
+  smoke gates; the source tree passes type, lint, format, and test gates.
+- Every acceptance path proves absence of SSH, LLM/model, shell, Docker,
+  Kubernetes, network, database, remote target, and other real I/O.
 
 ### Test Requirements
 
-Tests cover valid and invalid arguments, schema serialization, immutable
-metadata, unknown Tools, structured failures, redaction boundaries, and
-deterministic lookup.
+Tests cover all five meta-schemas, nested Contract input/output Schemas, RFC
+8785 vectors and exclusions, immutable artifact-derived Metadata, exact frozen
+lookup, duplicate and unknown identities, installed-file and lock drift,
+ToolCall and target binding, strict input and output validation, stable errors,
+timeouts, redaction and size boundaries, deterministic Mock output, sanitized
+offline replay, and wheel-installed package resources. `pytest`, Ruff, strict
+mypy, the local dependency-lock check, and clean local build/install checks
+must pass.
 
 ### Out of Scope
 
-SSH, Docker, remote execution, dynamic plugins, arbitrary Shell, and mutating
-Tools.
+SSH, LLMs or model adapters, Docker, Kubernetes, HTTP, database access,
+filesystem or process mutation, network or remote execution, dynamic plugins,
+arbitrary Shell, automatic retry, production registration, and mutating Tools.
 
 ## Phase 3 — Policy Engine
 

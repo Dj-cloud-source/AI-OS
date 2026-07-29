@@ -118,6 +118,8 @@ def test_lifecycle_event_datetime_hooks_cannot_raise_baseexception() -> None:
         ("task_id", "belong"),
         ("timestamp", "backwards"),
         ("history", "state-entry events"),
+        ("arguments_hash", "execution result identity"),
+        ("target_scope", "execution result identity"),
         ("status", "FAILED outcome"),
         ("missing_failure", "FAILED outcome"),
     ],
@@ -146,6 +148,10 @@ def test_runtime_outcome_rejects_contradictory_lifecycle_data(
             RuntimeState.FAILED,
         ]
         payload["task"]["state"] = RuntimeState.FAILED
+    elif mutation == "arguments_hash":
+        payload["results"][0]["arguments_hash"] = "d" * 64
+    elif mutation == "target_scope":
+        payload["results"][0]["target"]["resource_type"] = "other_resource"
     elif mutation == "status":
         payload["status"] = RuntimeOutcomeStatus.FAILED
     else:
@@ -250,7 +256,7 @@ def test_plan_and_results_require_completed_producer_stages() -> None:
 
     premature_result = waiting.model_dump(mode="python")
     premature_result["results"] = completed.model_dump(mode="python")["results"]
-    with pytest.raises(ValidationError, match="completed Executor"):
+    with pytest.raises(ValidationError, match="Incomplete Executor results"):
         RuntimeOutcome.model_validate(premature_result)
 
 

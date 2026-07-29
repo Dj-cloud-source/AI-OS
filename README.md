@@ -3,8 +3,10 @@
 A local-first, policy-controlled Runtime for safe and testable server
 operations.
 
-Phases 0–1 provide an installable Python foundation, a deterministic Mock Tool,
-and a fail-closed Runtime lifecycle without connecting to a real server.
+Phases 0–2 provide an installable Python foundation, a fail-closed Runtime
+lifecycle, and an artifact-driven Tool Protocol without connecting to a real
+server. The only registered Tool is the deterministic local
+`get_system_status@1.0.0` Mock.
 
 ## Current capabilities
 
@@ -12,15 +14,19 @@ and a fail-closed Runtime lifecycle without connecting to a real server.
 - `ai-server version`
 - `ai-server doctor`
 - Typed and immutable Runtime models
-- Deterministic L0 `get_system_status` Mock Tool
+- Five package-resident Tool Protocol JSON Schemas
+- Artifact-validated, immutable-after-startup Tool Registry
+- Exact-version, hash-bound Tool Gateway dispatch through Executor
+- Deterministic L0 `get_system_status@1.0.0` payload-only Mock Tool
 - Explicit Planner, Policy, Executor, and Verifier boundaries
 - Immutable structured outcomes and ordered lifecycle events
 - Approval pause and human rejection without pre-Phase-4 resume
 - Structured lifecycle and execution audit events
+- Repository-local `uv.lock` plus source, wheel, and clean-install build gates
 
 The current implementation contains no SSH, Shell, Docker, Kubernetes,
-database writes, LLM connections, configuration changes, or destructive
-operations.
+database writes, network or real-server access, LLM connections, configuration
+changes, or destructive operations.
 
 ## Local setup
 

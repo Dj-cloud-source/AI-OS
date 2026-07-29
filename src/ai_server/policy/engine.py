@@ -46,7 +46,7 @@ class PolicyEngine:
 
         resolved_risks: list[RiskLevel] = []
         for step in plan.steps:
-            key = (step.tool_name, step.tool_version)
+            key = (step.tool_id, step.tool_version)
             try:
                 metadata = catalog.get(key)
             except Exception:
@@ -63,8 +63,13 @@ class PolicyEngine:
             except Exception:
                 raise PolicyDeniedError("Policy denied malformed Tool metadata") from None
 
-            if (metadata.name, metadata.version) != key:
+            if (metadata.tool_id, metadata.version) != key:
                 raise PolicyDeniedError("Policy denied mismatched Tool metadata")
+            if (
+                step.contract_hash != metadata.contract_hash
+                or step.implementation_hash != metadata.implementation_hash
+            ):
+                raise PolicyDeniedError("Policy denied mismatched Tool integrity hashes")
 
             resolved_risks.append(metadata.risk_level)
 

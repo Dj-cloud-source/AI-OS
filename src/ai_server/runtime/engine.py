@@ -2,10 +2,9 @@
 
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
-from types import MappingProxyType
 from typing import Literal, cast
 from uuid import UUID
 
@@ -25,8 +24,8 @@ from ai_server.models.runtime import (
 )
 from ai_server.models.system_status import GetSystemStatusArguments, ServiceStatus, SystemStatus
 from ai_server.models.task import Task
-from ai_server.models.tool import ToolMetadata, ToolResult
-from ai_server.planner.service import GET_SYSTEM_STATUS_STEP, Planner
+from ai_server.models.tool import TargetReference, ToolError, ToolMetadata, ToolResult
+from ai_server.planner.service import Planner
 from ai_server.policy.engine import PolicyEngine, ToolKey
 from ai_server.runtime.errors import (
     ApprovalRequiredError,
@@ -44,7 +43,14 @@ from ai_server.runtime.errors import (
     VerificationError,
 )
 from ai_server.runtime.state import RuntimeState, RuntimeStateMachine
-from ai_server.tools.get_system_status import GET_SYSTEM_STATUS_METADATA
+from ai_server.tools.bootstrap import (
+    GET_SYSTEM_STATUS_TOOL_ID,
+    GET_SYSTEM_STATUS_TOOL_VERSION,
+    build_default_registry,
+)
+from ai_server.tools.gateway import ToolGateway
+from ai_server.tools.hashing import canonical_json_sha256
+from ai_server.tools.registry import ToolRegistry
 from ai_server.verifier.service import Verifier
 
 logger = logging.getLogger(__name__)
@@ -141,12 +147,16 @@ def _plan_has_trusted_nested_fields(plan: ExecutionPlan) -> bool:
 
 def _result_has_trusted_nested_fields(result: ToolResult[SystemStatus]) -> bool:
     """Return whether Tool evidence contains only exact structured result models."""
-    return (
-        type(result) is ToolResult[SystemStatus]
-        and type(result.data) is SystemStatus
-        and type(result.data.services) is tuple
-        and all(type(service) is ServiceStatus for service in result.data.services)
-    )
+    if type(result) is not ToolResult[SystemStatus]:
+        return False
+    if result.success:
+        return (
+            type(result.data) is SystemStatus
+            and type(result.data.services) is tuple
+            and all(type(service) is ServiceStatus for service in result.data.services)
+            and result.error is None
+        )
+    return result.data is None and type(result.error) is ToolError
 
 
 def _outcome_has_trusted_identity_fields(outcome: RuntimeOutcome) -> bool:
@@ -304,24 +314,21 @@ class RuntimeEngine:
         policy: PolicyEngine | None = None,
         executor: Executor | None = None,
         verifier: Verifier | None = None,
-        tool_metadata: ToolMetadata = GET_SYSTEM_STATUS_METADATA,
+        registry: ToolRegistry | None = None,
         clock: Clock = _utc_now,
     ) -> None:
-        """Compose the concrete local-only Phase 1 Runtime."""
+        """Compose the concrete local-only Runtime from a verified Tool Registry."""
         self._context_builder = context_builder if context_builder is not None else ContextBuilder()
         self._planner = planner if planner is not None else Planner()
         self._policy = policy if policy is not None else PolicyEngine()
-        self._executor = executor if executor is not None else Executor()
         self._verifier = verifier if verifier is not None else Verifier()
         self._clock = clock
-        self._tool_metadata = self._validate_tool_metadata(tool_metadata)
-        catalog: dict[ToolKey, ToolMetadata] = {
-            (
-                self._tool_metadata.name,
-                self._tool_metadata.version,
-            ): self._tool_metadata
-        }
-        self._catalog = MappingProxyType(catalog)
+        self._registry = self._validate_registry(
+            registry if registry is not None else self._build_default_registry()
+        )
+        self._catalog = self._registry.metadata_snapshot()
+        self._tool_metadata = self._resolve_runtime_metadata(self._catalog)
+        self._executor = executor if executor is not None else Executor(ToolGateway(self._registry))
 
     def run(self, task: Task) -> RuntimeOutcome:
         """Run a fresh Task until completion, failure, or an approval pause."""
@@ -516,6 +523,21 @@ class RuntimeEngine:
                 error=error,
                 plan=plan,
             )
+        if not results[-1].success:
+            self._log_execution_audit(
+                task,
+                plan,
+                results,
+                verification="not_run",
+            )
+            return self._failure_outcome(
+                task=task,
+                recorder=recorder,
+                component=RuntimeComponent.EXECUTOR,
+                error=ToolExecutionError("Tool returned a structured failure"),
+                plan=plan,
+                results=results,
+            )
         if not recorder.record(
             kind=LifecycleEventKind.COMPONENT_COMPLETED,
             state=task.state,
@@ -684,18 +706,39 @@ class RuntimeEngine:
         )
 
     @staticmethod
-    def _validate_tool_metadata(tool_metadata: ToolMetadata) -> ToolMetadata:
+    def _build_default_registry() -> ToolRegistry:
         try:
-            if type(tool_metadata) is not ToolMetadata:
+            return build_default_registry()
+        except BaseException:
+            raise PolicyDeniedError(
+                "Runtime could not bootstrap the reviewed Tool Registry"
+            ) from None
+
+    @staticmethod
+    def _validate_registry(registry: ToolRegistry) -> ToolRegistry:
+        if type(registry) is not ToolRegistry or not registry.is_frozen:
+            raise PolicyDeniedError("Runtime rejected an unsealed Tool Registry")
+        return registry
+
+    @staticmethod
+    def _resolve_runtime_metadata(
+        catalog: Mapping[ToolKey, ToolMetadata],
+    ) -> ToolMetadata:
+        try:
+            metadata = catalog.get(
+                (
+                    GET_SYSTEM_STATUS_TOOL_ID,
+                    GET_SYSTEM_STATUS_TOOL_VERSION,
+                )
+            )
+            if type(metadata) is not ToolMetadata:
                 raise TypeError
             validated = ToolMetadata.model_validate(
-                tool_metadata.model_dump(mode="python", warnings="none"),
+                metadata.model_dump(mode="python", warnings="error"),
                 strict=True,
             )
-        except Exception:
-            raise PolicyDeniedError("Runtime rejected malformed Tool metadata") from None
-        if validated != GET_SYSTEM_STATUS_METADATA:
-            raise PolicyDeniedError("Runtime rejected noncanonical Tool metadata")
+        except BaseException:
+            raise PolicyDeniedError("Runtime could not resolve canonical Tool metadata") from None
         return validated
 
     @staticmethod
@@ -753,8 +796,7 @@ class RuntimeEngine:
         except (TypeError, ValidationError):
             raise InvalidTaskError("Context Builder returned invalid Runtime context") from None
 
-    @staticmethod
-    def _validate_plan(plan: ExecutionPlan) -> ExecutionPlan:
+    def _validate_plan(self, plan: ExecutionPlan) -> ExecutionPlan:
         try:
             if not _plan_has_trusted_nested_fields(plan):
                 raise TypeError
@@ -762,43 +804,65 @@ class RuntimeEngine:
                 plan.model_dump(mode="python", warnings="none"),
                 strict=True,
             )
-            if not _plan_has_trusted_nested_fields(validated) or validated.steps != (
-                GET_SYSTEM_STATUS_STEP,
+            if not _plan_has_trusted_nested_fields(validated):
+                raise TypeError
+            if len(validated.steps) != 1:
+                raise TypeError
+            step = validated.steps[0]
+            if (
+                step.tool_id != self._tool_metadata.tool_id
+                or step.tool_version != self._tool_metadata.version
+                or step.contract_hash != self._tool_metadata.contract_hash
+                or step.implementation_hash != self._tool_metadata.implementation_hash
+                or step.arguments.target != validated.target
             ):
                 raise TypeError
             return validated
         except (TypeError, ValidationError):
             raise PlanMismatchError("Planner returned a malformed execution plan") from None
 
-    @staticmethod
     def _validate_results(
+        self,
         results: tuple[ToolResult[SystemStatus], ...],
         plan: ExecutionPlan,
     ) -> tuple[ToolResult[SystemStatus], ...]:
         try:
-            if type(results) is not tuple or len(results) != len(plan.steps):
+            if type(results) is not tuple or not results or len(results) > len(plan.steps):
                 raise TypeError
             validated_results: list[ToolResult[SystemStatus]] = []
-            for step, raw_result in zip(plan.steps, results, strict=True):
+            for step, raw_result in zip(plan.steps, results, strict=False):
                 if not _result_has_trusted_nested_fields(raw_result):
                     raise TypeError
                 result = ToolResult[SystemStatus].model_validate(
-                    raw_result.model_dump(mode="python", warnings="none"),
+                    raw_result.model_dump(mode="python", warnings="error"),
                     strict=True,
+                )
+                expected_target = TargetReference(
+                    target_id=plan.target,
+                    resource_type="local_system",
+                    resource_id=step.arguments.target,
                 )
                 if (
                     not _result_has_trusted_nested_fields(result)
-                    or result.tool_name != step.tool_name
+                    or result.plan_step_id != step.step_id
+                    or result.tool_id != step.tool_id
                     or result.tool_version != step.tool_version
+                    or result.contract_hash != step.contract_hash
+                    or result.arguments_hash != canonical_json_sha256(step.arguments)
+                    or result.target != expected_target
+                    or result.duration_ms > self._tool_metadata.timeout_ms
                 ):
                     raise TypeError
                 validated_results.append(result)
+            if len(validated_results) != len(plan.steps) and validated_results[-1].success:
+                raise TypeError
+            if any(not result.success for result in validated_results[:-1]):
+                raise TypeError
             return tuple(validated_results)
-        except (TypeError, ValidationError):
+        except (TypeError, ValueError, ValidationError):
             raise ToolExecutionError("Executor returned invalid structured evidence") from None
 
-    @staticmethod
-    def _validate_outcome(outcome: RuntimeOutcome) -> RuntimeOutcome:
+    def _validate_outcome(self, outcome: RuntimeOutcome) -> RuntimeOutcome:
         try:
             if type(outcome) is not RuntimeOutcome or not _outcome_has_trusted_identity_fields(
                 outcome
@@ -824,7 +888,7 @@ class RuntimeEngine:
             if not _outcome_has_trusted_identity_fields(validated):
                 raise TypeError
             if validated.plan is not None:
-                RuntimeEngine._validate_plan(validated.plan)
+                self._validate_plan(validated.plan)
             return validated
         except Exception:
             raise InvalidRuntimeOutcomeError(
@@ -972,7 +1036,7 @@ class RuntimeEngine:
                 result_status = result_override
                 duration_ms = None
             elif isinstance(result, ToolResult):
-                result_status = "success"
+                result_status = "success" if result.success else "execution_failed"
                 duration_ms = result.duration_ms
             else:
                 result_status = "invalid"
@@ -986,9 +1050,9 @@ class RuntimeEngine:
                     "operator": task.user,
                     "user": task.user,
                     "target": task.target,
-                    "tool": step.tool_name,
+                    "tool": step.tool_id,
                     "tool_version": step.tool_version,
-                    "arguments": step.arguments.model_dump(mode="json"),
+                    "arguments": {"redacted": True},
                     "result": result_status,
                     "duration_ms": duration_ms,
                     "verification": verification,

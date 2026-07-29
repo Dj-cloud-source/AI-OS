@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-server:schema:tool-replay-fixture-v1",
+  "title": "AI Server Tool Replay Fixture v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "fixture_schema_version",
+    "fixture_id",
+    "content_hash",
+    "tool_id",
+    "version",
+    "provenance",
+    "sequence_position",
+    "input",
+    "arguments_hash",
+    "result",
+    "verification_result",
+    "expected_outcome",
+    "expected_error_code",
+    "redaction"
+  ],
+  "properties": {
+    "fixture_schema_version": {
+      "const": "1"
+    },
+    "fixture_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "content_hash": {
+      "$ref": "#/$defs/hash"
+    },
+    "tool_id": {
+      "$ref": "#/$defs/toolId"
+    },
+    "version": {
+      "$ref": "#/$defs/semanticVersion"
+    },
+    "provenance": {
+      "enum": [
+        "recorded_sanitized",
+        "mock"
+      ]
+    },
+    "sequence_position": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "input": {
+      "type": "object"
+    },
+    "arguments_hash": {
+      "$ref": "#/$defs/hash"
+    },
+    "result": {
+      "$ref": "urn:ai-server:schema:tool-result-v1"
+    },
+    "verification_result": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/verificationResult"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "expected_outcome": {
+      "enum": [
+        "success",
+        "failure"
+      ]
+    },
+    "expected_error_code": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "redaction": {
+      "$ref": "#/$defs/redactionReport"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "expected_outcome": {
+            "const": "success"
+          }
+        },
+        "required": [
+          "expected_outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "expected_error_code": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "expected_error_code": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "toolId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "semanticVersion": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]*$"
+    },
+    "verificationResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "success",
+        "criteria",
+        "evidence",
+        "failure_reason"
+      ],
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "criteria": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "maxProperties": 128
+        },
+        "failure_reason": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "success": {
+                "const": true
+              }
+            },
+            "required": [
+              "success"
+            ]
+          },
+          "then": {
+            "properties": {
+              "failure_reason": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "failure_reason": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "redactionReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile_version",
+        "sanitized",
+        "removed_data_classes"
+      ],
+      "properties": {
+        "profile_version": {
+          "$ref": "#/$defs/semanticVersion"
+        },
+        "sanitized": {
+          "const": true
+        },
+        "removed_data_classes": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[a-z][a-z0-9_]*$"
+          }
+        }
+      }
+    }
+  }
+}
