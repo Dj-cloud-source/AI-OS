@@ -46,6 +46,20 @@ FORBIDDEN_CALLS = {
 }
 
 FORBIDDEN_PACKAGE_IMPORTS = {
+    "approval": {
+        "ai_server.executor",
+        "ai_server.llm",
+        "ai_server.memory",
+        "ai_server.model_adapter",
+        "ai_server.model_adapters",
+        "ai_server.planner",
+        "ai_server.policy",
+        "ai_server.storage",
+        "ai_server.tools.bootstrap",
+        "ai_server.tools.gateway",
+        "ai_server.tools.get_system_status",
+        "ai_server.tools.registry",
+    },
     "context": {"ai_server.executor", "ai_server.tools"},
     "executor": {
         "ai_server.llm",

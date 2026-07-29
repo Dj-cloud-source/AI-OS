@@ -1,7 +1,6 @@
 # AIOps Agent Runtime Roadmap
 
-Status: Phases 0–3 and Approval Gate conformance implemented; Phases 4–11
-planned
+Status: Phases 0–4 implemented; Phases 5–11 planned
 
 This roadmap defines the implementation order for the local-first AIOps Agent
 Runtime. It is subordinate to `docs/VISION.md`, `docs/PHILOSOPHY.md`,
@@ -16,9 +15,10 @@ capability is enabled by the current implementation.
 
 Approval Gate conformance means that every Policy-allowed Plan passes through
 `WAITING_FOR_APPROVAL`, `NOT_REQUIRED` is recorded, human-approval-required
-work pauses without dispatch, and direct bypass is rejected. It does not mean
-that Phase 4 approval issuance, persistence, resumption, or L3 confirmation is
-implemented.
+work pauses without dispatch, and direct bypass is rejected. Phase 4 adds only
+in-process approval issuance, validation, consumption protocols, and L3
+confirmation contracts. Persistent authorization, cross-process resumption,
+and dispatch of a human-approved Plan remain unavailable.
 
 ## Fixed architecture decisions
 
@@ -60,11 +60,13 @@ implemented.
   not permitted.
 - L1 is fail-closed: an exact missing rule is `DENY`; an exact matching rule
   may resolve to `NOT_REQUIRED` or `HUMAN_PLAN_APPROVAL`.
-- Until Phase 4 implements and tests single-use per-invocation confirmation,
-  every resolved L3 Step is denied. An L3 Step whose identity, integrity, and
-  target-scope checks pass uses `l3_confirmation_unavailable`; an earlier
-  identity, integrity, or scope failure retains its more specific stable denial
-  reason. Neither a model nor policy configuration can relax this gate.
+- Until Phase 5 atomically connects single-use per-invocation confirmation to
+  the exact Tool dispatch boundary, every resolved L3 Step is denied. Phase 4
+  implements and tests the isolated confirmation protocol but does not relax
+  this production gate. An L3 Step whose identity, integrity, and target-scope
+  checks pass uses `l3_confirmation_unavailable`; an earlier identity,
+  integrity, or scope failure retains its more specific stable denial reason.
+  Neither a model nor policy configuration can relax this gate.
 
 ## Cross-phase failure rules
 
@@ -349,14 +351,18 @@ and model-based risk classification.
 
 ## Phase 4 — Approval
 
+Status: Implemented (process-local authorization only; no human-approved
+dispatch)
+
 ### Goal
 
 Implement exact-plan approval that expires and cannot authorize a changed plan.
 
 ### Inputs
 
-A PolicyDecision, canonical ExecutionPlan, local approver identity, and UTC
-clock.
+A PolicyDecision requiring `HUMAN_PLAN_APPROVAL`, canonical ExecutionPlan,
+frozen Registry Metadata, fixed `local-user` operator and `local-owner`
+approver, reviewed TTL constraints, and UTC clock.
 
 ### Outputs
 
@@ -364,18 +370,25 @@ An ApprovalRecord and a structured validation result.
 
 ### Deliverables
 
-Canonical plan serialization, SHA-256 plan hashing, approval creation,
-validation, one-time consumption, expiration, invalidation, per-Step L3
-confirmation, and an in-process CLI Review/Commit path.
+A strict `PlanApprovalSnapshot`, canonical SHA-256 plan hashing, approval
+creation, validation, one-time consumption, expiration, invalidation, per-Step
+L3 confirmation protocol, and an in-process CLI Review/Commit path. The
+reviewed Policy Profile fixes a 300-second Review session, a 300-second Plan
+Approval, and a 30-second L3 confirmation ceiling. The local operator remains
+`local-user`; only the fixed local control-plane identity `local-owner` may
+Commit or Confirm.
 
 ### Acceptance Criteria
 
 Approval binds the ordered steps, Tool names and versions, exact arguments,
 target, verification criteria, approver, and expiration. Any execution-relevant
 change invalidates approval. Expired, consumed, rejected, or mismatched approval
-is rejected. Phase 4 Review/Commit occurs in one CLI process; cross-process
-resume is deferred until Phase 9. Consumption binds approval to one execution
-attempt and cannot authorize a retry or second attempt.
+is rejected. Phase 4 Review/Commit occurs in one CLI process and leaves the Task
+in `WAITING_FOR_APPROVAL`; Phase 5 connects atomic validation and consumption
+to Executor dispatch. Cross-process resume is deferred until Phase 9.
+Consumption binds approval to one execution attempt and cannot authorize a
+retry or second attempt. The default Registry remains L0-only and no synthetic
+L2 capability is registered for demonstration.
 
 ### Test Requirements
 
@@ -385,8 +398,10 @@ single-use per-Step L3 confirmation.
 
 ### Out of Scope
 
-Database persistence, Web approval, multi-user approval, dual control, RBAC,
-and remote identity providers.
+Executor dispatch or `WAITING_FOR_APPROVAL → EXECUTING` resumption for a
+human-approved Plan, database or file persistence, cross-process resume, Web
+approval, multi-user approval, dual control, RBAC, remote identity providers,
+and any registered L2/L3 capability.
 
 ## Phase 5 — Executor
 

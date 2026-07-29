@@ -37,7 +37,7 @@ class ApprovalRequiredError(AiServerError):
 
 
 class ApprovalResumeUnavailableError(InvalidStateTransitionError):
-    """Raised when Phase 1 is asked to resume approval-paused work."""
+    """Raised before Phase 5 can resume human-approved work at dispatch."""
 
     code: ClassVar[str] = "approval_resume_unavailable"
 

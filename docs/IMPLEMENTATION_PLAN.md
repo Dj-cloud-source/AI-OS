@@ -1,7 +1,6 @@
 # AIOps Agent Runtime Implementation Plan
 
-Status: Phases 0–3 and Approval Gate conformance implemented; Phases 4–11
-planned
+Status: Phases 0–4 implemented; Phases 5–11 planned
 
 ## 1. Authority and scope
 
@@ -22,8 +21,10 @@ they add no real server capability.
 Completed Approval Gate conformance means that every Policy-allowed Plan enters
 `WAITING_FOR_APPROVAL`, an audited `NOT_REQUIRED` decision exits immediately,
 human-approval-required work pauses without calling Executor, and direct bypass
-is rejected. Phase 4 still owns approval issuance, persistence, resumption,
-expiration, consumption, and L3 per-invocation confirmation.
+is rejected. Phase 4 owns only in-process approval issuance, validation,
+expiration, invalidation, consumption protocols, and L3 confirmation
+contracts. Phase 5 owns the atomic connection from authorization to Executor;
+Phase 9 owns persistence and cross-process resumption.
 
 The decisions below are subordinate implementation guidance. When this plan
 and a governing document differ, implementation stops and the governing
@@ -100,11 +101,12 @@ Changing Profile content invalidates the old review and requires an
 independently reviewed record for the new hash.
 
 L1 is fail-closed: absence of an exact capability rule is `DENY`; a matching
-rule explicitly selects `NOT_REQUIRED` or `HUMAN_PLAN_APPROVAL`. Phase 3 always
-denies resolved L3 Steps. An L3 Step that passes identity, integrity, and target
-scope checks uses `l3_confirmation_unavailable`; earlier validation failures
-retain their specific reason. Only Phase 4 may revise the fixed L3 denial,
-after single-use per-invocation confirmation is implemented and tested.
+rule explicitly selects `NOT_REQUIRED` or `HUMAN_PLAN_APPROVAL`. Resolved L3
+Steps remain denied until Phase 5 atomically connects the Phase 4 single-use
+confirmation protocol to the exact Tool dispatch boundary. An L3 Step that
+passes identity, integrity, and target scope checks uses
+`l3_confirmation_unavailable`; earlier validation failures retain their
+specific reason.
 
 Diagnosis is the Planner's evidence-linked explanation and `reason` output, not
 a separate component or state. Review and Commit are Approval events represented
@@ -224,10 +226,11 @@ Only Runtime changes Task state.
   timeout, retry boundary, Verification, rollback, and replay references.
 - `ToolMetadata`: read-only Registry projection derived from one validated
   exact Tool Contract. It contains Tool ID and Version, Contract and
-  Implementation Hashes, description, static RiskLevel, timeout, idempotency,
-  Schema identities, and typed model bindings. Required approval mode is not
-  independently configurable Metadata; Policy derives it from RiskLevel and
-  the fixed risk matrix.
+  Implementation Hashes, description, static RiskLevel, side effects, target
+  scope, redaction, Verification, rollback, timeout, idempotency, Schema
+  identities, and typed model bindings. Required approval mode is not
+  independently configurable Metadata; Policy derives it from RiskLevel and the
+  fixed risk matrix.
 - `ToolRegistryRecord`: separate status and review record binding exact Tool
   identity, Contract Hash, Implementation Hash, reviewer, and UTC timestamps
   without mutating the immutable Contract.
@@ -242,8 +245,15 @@ Only Runtime changes Task state.
   non-negative duration. It is never a plain string.
 - `PolicyDecision`: allow/deny, reason code, resolved risk, and required
   approval mode.
-- `ApprovalRecord`: plan hash, exact ordered arguments, approver, approval mode,
-  issued-at, and expires-at.
+- `PlanApprovalSnapshot`: exact ordered Plan content plus frozen Registry risk,
+  scope, side-effect, redaction, Verification, and rollback projections; it is
+  the sole Plan Hash input and retains only arguments safe for human review.
+- `ApprovalReview`: short-lived exact safe snapshot, Plan Hash, Policy
+  identity/decision hash, risk, approval requirements, target, and expiration.
+- `ApprovalRecord`: plan hash, ordered arguments-hash commitments, approver,
+  approval mode, issued-at, expires-at, and immutable content hash.
+- `ApprovalAuditEvent`: append-only non-secret Review, Approval, attempt, and
+  L3 confirmation facts with ordered arguments-hash commitments.
 - `ManualConfirmationRecord`: Approval ID, plan hash, exact L3 step ID,
   canonical arguments hash, confirmer, execution-attempt ID, issued-at,
   short expires-at, and one-time consumption event.
@@ -267,7 +277,7 @@ empty future interfaces:
 | RuntimeOutcome and lifecycle events | Phase 1 |
 | ToolContract, ToolRegistryRecord, ToolCall, ToolError, and replay/implementation artifacts | Phase 2 |
 | PolicyDecision | Phase 3 |
-| ApprovalRecord | Phase 4 |
+| PlanApprovalSnapshot, ApprovalReview, ApprovalRecord, ManualConfirmationRecord, ApprovalAuditEvent | Phase 4 |
 | ExecutionReport | Phase 5 |
 | VerificationResult | Phase 6 |
 | Target, BootstrapContext, ContextProfile, ContextProfileRegistryRecord, and ObservationRequest | Phase 8 |
@@ -759,6 +769,9 @@ multi-user identity, and remote policy services.
 
 ## Phase 4 — Approval
 
+Status: Implemented (process-local authorization only; no human-approved
+dispatch)
+
 ### Goal
 
 Create a transactional human authorization that applies only to one exact,
@@ -766,9 +779,10 @@ unexpired ExecutionPlan.
 
 ### Inputs
 
-- A PolicyDecision requiring L2 or L3 approval.
+- A PolicyDecision requiring `HUMAN_PLAN_APPROVAL`, including Policy-raised
+  L0/L1 restrictions and mandatory L2/L3 approval.
 - A validated ExecutionPlan and registered Tool Metadata.
-- A local approver identity.
+- The fixed local operator `local-user` and local approver `local-owner`.
 - An injectable timezone-aware UTC clock.
 
 ### Outputs
@@ -780,14 +794,19 @@ unexpired ExecutionPlan.
 
 ### Deliverables
 
-- Canonical plan serialization and SHA-256 hashing defined in section 2.6.
+- A strict `PlanApprovalSnapshot` derived from the Plan, Policy Decision, and
+  frozen Registry Metadata; this snapshot is the only plan-hash input.
+- Canonical snapshot serialization and SHA-256 hashing defined in section 2.6.
 - Plan review data containing why, what, impact, verification, and recovery for
   every step.
-- Approval issuance with explicit expiration.
-- Approval revalidation immediately before Executor dispatch.
+- A reviewed Policy Profile v1.1 using Profile Schema v2. It fixes maximum
+  Review, Approval, and L3 confirmation TTLs at 300, 300, and 30 seconds.
+- Approval issuance with Policy-controlled expiration.
+- Approval revalidation and consumption APIs for the future Executor boundary.
 - A single-use L3 confirmation bound to the unchanged Plan, exact Step and
-  Arguments immediately before each L3 invocation.
-- One-time approval consumption when execution dispatch begins.
+  Arguments, execution attempt, and invocation.
+- Atomic one-time approval and confirmation consumption protocols, exercised
+  only against a fake dispatch boundary in Phase 4.
 - An in-process `ai-server run` Review/Commit interaction that displays the
   exact plan and hash; Phase 4 stops after recording authorization, and Phase 5
   connects the same-process flow to Executor.
@@ -807,8 +826,15 @@ unexpired ExecutionPlan.
   L3 Step invocation.
 - In local single-user mode the two L3 events may have the same approver, but
   they are separate, ordered, timestamped actions.
-- Phase 4 storage and CLI interaction are in one process; persistence and
-  cross-process resume are not introduced before Phase 9.
+- Only an explicit interactive TTY `COMMIT <full-plan-hash>` may create an
+  Approval. There is no `--yes`, piped approval, environment override, or
+  model-callable approval path.
+- Phase 4 authorization and CLI interaction exist only in one process. Commit
+  leaves the Task in `WAITING_FOR_APPROVAL`; human-approved execution is not
+  connected until Phase 5. Persistence and cross-process resume are not
+  introduced before Phase 9.
+- The default Registry stays L0-only; human approval behavior is tested with
+  synthetic metadata that has no Tool handler or dispatch capability.
 
 ### Test Requirements
 
@@ -823,7 +849,9 @@ unexpired ExecutionPlan.
 ### Out of Scope
 
 Persistent approval storage, Web UI, multi-user workflows, multiple approvers,
-RBAC, external identity, approval delegation, and approval reuse.
+RBAC, external identity, approval delegation, approval reuse, any real or
+registered L2/L3 Tool, and dispatch or Runtime resumption of a human-approved
+Plan.
 
 ## Phase 5 — Executor
 

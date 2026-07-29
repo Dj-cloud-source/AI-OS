@@ -387,6 +387,9 @@ class ToolMetadata(BaseModel):
     risk_level: RiskLevel
     side_effects: ToolSideEffects
     target_scope: ToolTargetScope
+    redaction: RedactionRequirement
+    verification: VerificationRequirement
+    rollback: RollbackRequirement
     timeout_ms: int = Field(ge=1, le=3_600_000)
     idempotent: bool
     input_schema_id: str = Field(min_length=1, max_length=512)

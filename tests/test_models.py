@@ -14,13 +14,17 @@ from ai_server.models.system_status import (
 )
 from ai_server.models.task import Task
 from ai_server.models.tool import (
+    RedactionRequirement,
     RiskLevel,
+    RollbackRequirement,
+    RollbackStrategy,
     SideEffectKind,
     TargetReference,
     ToolMetadata,
     ToolResult,
     ToolSideEffects,
     ToolTargetScope,
+    VerificationRequirement,
 )
 from ai_server.planner.service import Planner
 from ai_server.runtime.errors import InvalidTaskError, UnsupportedTaskError
@@ -78,6 +82,21 @@ def make_tool_metadata() -> ToolMetadata:
             maximum_targets=1,
             selector_field="target",
             allow_dynamic_expansion=False,
+        ),
+        redaction=RedactionRequirement(
+            profile_id="local-default",
+            profile_version="1.0.0",
+            safe_evidence_fields=("source",),
+            max_retained_payload_bytes=4096,
+        ),
+        verification=VerificationRequirement(
+            required=True,
+            evidence_fields=("source",),
+        ),
+        rollback=RollbackRequirement(
+            required=False,
+            available=False,
+            strategy=RollbackStrategy.NOT_REQUIRED,
         ),
         timeout_ms=1000,
         idempotent=True,

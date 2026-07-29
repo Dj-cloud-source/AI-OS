@@ -1,0 +1,10 @@
+{
+  "record_schema_version": "1",
+  "policy_id": "local-default",
+  "version": "1.1.0",
+  "content_hash": "41582d1db33d5885c33a3f8198461742995b253079ff01382216630f54cb96e9",
+  "status": "active",
+  "reviewer": "local-owner",
+  "reviewed_at": "2026-07-29T00:00:00Z",
+  "activated_at": "2026-07-29T00:00:00Z"
+}

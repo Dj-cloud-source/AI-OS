@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from ai_server.models.policy import (
+    ApprovalConstraints,
     ManualConfirmationRequirement,
     PolicyApprovalRequirement,
     PolicyCapabilityRule,
@@ -26,6 +27,11 @@ TARGET = TargetReference(
     target_id="local-mock",
     resource_type="local_system",
     resource_id="local-mock",
+)
+APPROVAL_CONSTRAINTS = ApprovalConstraints(
+    review_session_ttl_seconds=300,
+    plan_approval_ttl_seconds=300,
+    l3_confirmation_ttl_seconds=30,
 )
 
 
@@ -99,6 +105,63 @@ def test_policy_context_profile_and_review_record_round_trip() -> None:
     assert PolicyReviewRecord.model_validate_json(review.model_dump_json()) == review
 
 
+def test_policy_profile_v2_requires_bounded_approval_constraints() -> None:
+    profile = PolicyProfile(
+        profile_schema_version="2",
+        policy_id="local-default",
+        version="1.1.0",
+        rules=(make_rule(),),
+        approval_constraints=APPROVAL_CONSTRAINTS,
+    )
+
+    assert PolicyProfile.model_validate_json(profile.model_dump_json()) == profile
+    assert profile.approval_constraints == APPROVAL_CONSTRAINTS
+
+    with pytest.raises(ValidationError, match="requires approval constraints"):
+        PolicyProfile(
+            profile_schema_version="2",
+            policy_id="local-default",
+            version="1.1.0",
+            rules=(make_rule(),),
+        )
+    with pytest.raises(ValidationError, match="cannot define approval constraints"):
+        PolicyProfile(
+            profile_schema_version="1",
+            policy_id="local-default",
+            version="1.0.0",
+            rules=(make_rule(),),
+            approval_constraints=APPROVAL_CONSTRAINTS,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("review_session_ttl_seconds", 0),
+        ("review_session_ttl_seconds", 301),
+        ("plan_approval_ttl_seconds", 0),
+        ("plan_approval_ttl_seconds", 301),
+        ("l3_confirmation_ttl_seconds", 0),
+        ("l3_confirmation_ttl_seconds", 31),
+        ("review_session_ttl_seconds", True),
+        ("plan_approval_ttl_seconds", 1.0),
+    ],
+)
+def test_approval_constraints_reject_out_of_range_and_non_strict_values(
+    field: str,
+    value: object,
+) -> None:
+    payload: dict[str, object] = {
+        "review_session_ttl_seconds": 300,
+        "plan_approval_ttl_seconds": 300,
+        "l3_confirmation_ttl_seconds": 30,
+    }
+    payload[field] = value
+
+    with pytest.raises(ValidationError):
+        ApprovalConstraints.model_validate(payload, strict=True)
+
+
 @pytest.mark.parametrize(
     "model",
     [
@@ -109,6 +172,7 @@ def test_policy_context_profile_and_review_record_round_trip() -> None:
             version="1.0.0",
             rules=(make_rule(),),
         ),
+        APPROVAL_CONSTRAINTS,
         make_step_decision(),
     ],
 )

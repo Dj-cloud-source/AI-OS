@@ -10,8 +10,10 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
+from ai_server.approval.engine import ApprovalEngine
 from ai_server.context.builder import ContextBuilder
 from ai_server.executor.service import Executor
+from ai_server.models.approval import ApprovalRecord, ApprovalReview
 from ai_server.models.context import RuntimeContext
 from ai_server.models.execution import ExecutionPlan, ExecutionStep, StepRole
 from ai_server.models.policy import (
@@ -148,6 +150,50 @@ def _safe_log_policy_decision(decision: PolicyDecision) -> None:
                             "reason_code": step.reason_code.value,
                         }
                         for step in decision.step_decisions
+                    ],
+                },
+                sort_keys=True,
+            )
+        )
+
+
+def _safe_log_approval_record(record: ApprovalRecord) -> None:
+    """Emit a non-secret Approval issuance audit without exact arguments."""
+    with suppress(BaseException):  # noqa: B036 - logging cannot control Runtime.
+        logger.info(
+            json.dumps(
+                {
+                    "event": "plan_approval_issued",
+                    "approval_id": str(record.approval_id),
+                    "review_id": str(record.review_id),
+                    "task_id": str(record.task_id),
+                    "plan_id": str(record.plan_id),
+                    "plan_hash": record.plan_hash,
+                    "policy_id": record.policy_id,
+                    "policy_version": record.policy_version,
+                    "policy_hash": record.policy_hash,
+                    "policy_decision_hash": record.policy_decision_hash,
+                    "operator_id": record.operator_id,
+                    "approver": record.approver,
+                    "effective_risk": record.effective_risk.value,
+                    "approval_requirement": record.approval_requirement.value,
+                    "manual_confirmation_requirement": (
+                        record.manual_confirmation_requirement.value
+                    ),
+                    "issued_at": record.issued_at.isoformat(),
+                    "expires_at": record.expires_at.isoformat(),
+                    "content_hash": record.content_hash,
+                    "steps": [
+                        {
+                            "step_index": step.step_index,
+                            "step_id": step.step_id,
+                            "tool_id": step.tool_id,
+                            "tool_version": step.tool_version,
+                            "contract_hash": step.contract_hash,
+                            "implementation_hash": step.implementation_hash,
+                            "arguments_hash": step.arguments_hash,
+                        }
+                        for step in record.steps
                     ],
                 },
                 sort_keys=True,
@@ -432,6 +478,11 @@ class RuntimeEngine:
         self._catalog = self._registry.metadata_snapshot()
         self._tool_metadata = self._resolve_runtime_metadata(self._catalog)
         self._policy = PolicyEngine(self._registry)
+        self._approval = ApprovalEngine(
+            self._catalog,
+            self._policy.approval_constraints,
+            clock=self._clock,
+        )
         self._executor = executor if executor is not None else Executor(ToolGateway(self._registry))
 
     def run(self, task: Task) -> RuntimeOutcome:
@@ -846,6 +897,69 @@ class RuntimeEngine:
             failure=failure,
         )
 
+    def prepare_approval_review(self, outcome: RuntimeOutcome) -> ApprovalReview:
+        """Prepare an exact process-local Review for a human-approval pause."""
+        _, plan, decision = self._approval_inputs(outcome)
+        return self._approval.prepare_review(plan, decision)
+
+    def commit_approval(
+        self,
+        outcome: RuntimeOutcome,
+        review_id: UUID,
+    ) -> ApprovalRecord:
+        """Commit one exact Review without resuming or dispatching the Plan."""
+        _, plan, decision = self._approval_inputs(outcome)
+        record = self._approval.commit(review_id, plan, decision)
+        _safe_log_approval_record(record)
+        return record
+
+    def reject_approval(
+        self,
+        outcome: RuntimeOutcome,
+        review_id: UUID,
+    ) -> RuntimeOutcome:
+        """Reject one exact Review and close its paused Runtime outcome."""
+        trusted_outcome, plan, decision = self._approval_inputs(outcome)
+        self._approval.reject(review_id, plan, decision)
+        return self.reject(trusted_outcome)
+
+    def _approval_inputs(
+        self,
+        outcome: RuntimeOutcome,
+    ) -> tuple[RuntimeOutcome, ExecutionPlan, PolicyDecision]:
+        """Rebuild and bind an Approval request to this Runtime's current Policy."""
+        trusted_outcome = self._validate_outcome(outcome)
+        if (
+            trusted_outcome.status is not RuntimeOutcomeStatus.WAITING_FOR_APPROVAL
+            or trusted_outcome.task.state is not RuntimeState.WAITING_FOR_APPROVAL
+            or trusted_outcome.plan is None
+            or trusted_outcome.policy_decision is None
+            or trusted_outcome.failure is not None
+            or trusted_outcome.results
+        ):
+            raise InvalidRuntimeOutcomeError(
+                "Approval requires an exact WAITING_FOR_APPROVAL outcome"
+            )
+        context = PolicyEvaluationContext(
+            operator_id=trusted_outcome.task.user,
+            target=TargetReference(
+                target_id=trusted_outcome.task.target,
+                resource_type="local_system",
+                resource_id=trusted_outcome.task.target,
+            ),
+        )
+        decision = self._validate_policy_decision(
+            trusted_outcome.policy_decision,
+            plan=trusted_outcome.plan,
+            context=context,
+        )
+        if (
+            decision.effect is not PolicyEffect.ALLOW
+            or decision.approval_requirement is not PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL
+        ):
+            raise InvalidRuntimeOutcomeError("Approval requires a human-approval Policy Decision")
+        return trusted_outcome, trusted_outcome.plan, decision
+
     @staticmethod
     def _build_default_registry() -> ToolRegistry:
         try:
@@ -909,7 +1023,7 @@ class RuntimeEngine:
             )
         if task.state is RuntimeState.WAITING_FOR_APPROVAL:
             raise ApprovalResumeUnavailableError(
-                "Approval-paused work cannot resume before Phase 4"
+                "Human-approved execution remains unavailable until Phase 5"
             )
         if task.state is not RuntimeState.RECEIVED or task.state_history != (
             RuntimeState.RECEIVED,

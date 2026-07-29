@@ -1,8 +1,23 @@
 """Public Pydantic data models."""
 
+from ai_server.models.approval import (
+    ApprovalAuditEvent,
+    ApprovalAuditEventKind,
+    ApprovalInvalidationReason,
+    ApprovalRecord,
+    ApprovalReview,
+    ApprovalStepBinding,
+    ApprovalValidationReason,
+    ApprovalValidationResult,
+    ApprovalValidationVerdict,
+    ManualConfirmationRecord,
+    PlanApprovalSnapshot,
+    PlanStepApprovalSnapshot,
+)
 from ai_server.models.context import RuntimeContext
 from ai_server.models.execution import ExecutionPlan, ExecutionStep, StepRole
 from ai_server.models.policy import (
+    ApprovalConstraints,
     ManualConfirmationRequirement,
     PolicyApprovalRequirement,
     PolicyCapabilityRule,
@@ -42,12 +57,25 @@ from ai_server.models.tool import (
 )
 
 __all__ = [
+    "ApprovalAuditEvent",
+    "ApprovalAuditEventKind",
+    "ApprovalConstraints",
+    "ApprovalInvalidationReason",
+    "ApprovalRecord",
+    "ApprovalReview",
+    "ApprovalStepBinding",
+    "ApprovalValidationReason",
+    "ApprovalValidationResult",
+    "ApprovalValidationVerdict",
     "ExecutionPlan",
     "ExecutionStep",
     "GetSystemStatusArguments",
     "LifecycleEvent",
     "LifecycleEventKind",
     "ManualConfirmationRequirement",
+    "ManualConfirmationRecord",
+    "PlanApprovalSnapshot",
+    "PlanStepApprovalSnapshot",
     "PolicyApprovalRequirement",
     "PolicyCapabilityRule",
     "PolicyDecision",

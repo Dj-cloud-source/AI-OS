@@ -11,20 +11,25 @@ from typing import Any, Never, cast
 from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import JsonValue, ValidationError
 
-from ai_server.models.policy import PolicyProfile, PolicyReviewRecord
+from ai_server.models.policy import ApprovalConstraints, PolicyProfile, PolicyReviewRecord
 from ai_server.models.tool import ToolMetadata
 from ai_server.policy.errors import PolicyConfigurationError
 from ai_server.tools.hashing import canonical_json_sha256
 
 DEFAULT_POLICY_ID = "local-default"
-DEFAULT_POLICY_VERSION = "1.0.0"
-POLICY_PROFILE_SCHEMA_ID = "urn:ai-server:policy:profile:1"
+DEFAULT_POLICY_VERSION = "1.1.0"
+POLICY_PROFILE_SCHEMA_ID = "urn:ai-server:policy:profile:2"
 POLICY_REVIEW_RECORD_SCHEMA_ID = "urn:ai-server:policy:review-record:1"
 
 _POLICY_SCHEMA_FILES = (
     "policy-profile-v1.json",
+    "policy-profile-v2.json",
     "policy-review-record-v1.json",
 )
+_POLICY_PROFILE_SCHEMA_IDS = {
+    "1": "urn:ai-server:policy:profile:1",
+    "2": POLICY_PROFILE_SCHEMA_ID,
+}
 _POLICY_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _VERSION_PATTERN = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
@@ -40,6 +45,11 @@ class ValidatedPolicyArtifacts:
     profile: PolicyProfile
     review_record: PolicyReviewRecord
     profile_hash: str
+
+    @property
+    def approval_constraints(self) -> ApprovalConstraints | None:
+        """Return reviewed approval constraints when defined by the Profile."""
+        return self.profile.approval_constraints
 
 
 def load_policy_artifacts(
@@ -62,8 +72,14 @@ def load_policy_artifacts(
         schemas = _load_normative_schemas()
         profile_raw, profile_text = _load_json_document(artifact_root.joinpath("profile.json"))
         review_raw, review_text = _load_json_document(artifact_root.joinpath("review-record.json"))
+        profile_schema_version = profile_raw.get("profile_schema_version")
+        if type(profile_schema_version) is not str:
+            raise PolicyConfigurationError("Policy Profile Schema version is unsupported")
+        profile_schema_id = _POLICY_PROFILE_SCHEMA_IDS.get(profile_schema_version)
+        if profile_schema_id is None:
+            raise PolicyConfigurationError("Policy Profile Schema version is unsupported")
         _validate_schema_document(
-            schemas[POLICY_PROFILE_SCHEMA_ID],
+            schemas[profile_schema_id],
             profile_raw,
         )
         _validate_schema_document(
@@ -105,7 +121,7 @@ def _load_normative_schemas() -> dict[str, dict[str, Any]]:
             raise PolicyConfigurationError("Policy Schema identity is invalid")
         schemas[schema_id] = raw
     expected_ids = {
-        POLICY_PROFILE_SCHEMA_ID,
+        *_POLICY_PROFILE_SCHEMA_IDS.values(),
         POLICY_REVIEW_RECORD_SCHEMA_ID,
     }
     if set(schemas) != expected_ids:

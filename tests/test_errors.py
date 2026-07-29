@@ -1,3 +1,9 @@
+from ai_server.approval.errors import (
+    ApprovalConfigurationError,
+    ApprovalError,
+    ApprovalReviewError,
+    ApprovalStateError,
+)
 from ai_server.policy.errors import PolicyConfigurationError
 from ai_server.runtime.errors import (
     AiServerError,
@@ -21,6 +27,10 @@ from ai_server.runtime.errors import (
 def test_domain_error_codes_are_stable_and_unique() -> None:
     expected_codes = {
         AiServerError: "ai_server_error",
+        ApprovalError: "approval_error",
+        ApprovalConfigurationError: "approval_configuration",
+        ApprovalReviewError: "approval_review",
+        ApprovalStateError: "approval_state",
         ApprovalRequiredError: "approval_required",
         ApprovalResumeUnavailableError: "approval_resume_unavailable",
         InvalidClockError: "invalid_clock",

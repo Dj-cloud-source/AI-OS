@@ -9,8 +9,10 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from ai_server.approval.errors import ApprovalStateError
 from ai_server.context.builder import ContextBuilder
 from ai_server.executor.service import Executor
+from ai_server.models.approval import ApprovalAuditEventKind
 from ai_server.models.context import RuntimeContext
 from ai_server.models.execution import ExecutionPlan, StepRole
 from ai_server.models.policy import (
@@ -1121,6 +1123,96 @@ def test_human_rejection_closes_paused_outcome_without_tool_call() -> None:
     assert rejected.events[-2].kind is LifecycleEventKind.STATE_ENTERED
     assert rejected.events[-1].kind is LifecycleEventKind.REJECTED
     assert trace.calls == ["context", "planner", "policy"]
+
+
+def test_phase4_review_and_commit_record_authorization_without_dispatch() -> None:
+    trace = Trace()
+    runtime = make_runtime(
+        trace,
+        approval_requirement=PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL,
+    )
+    paused = runtime.run(Task(request=SUPPORTED_REQUEST))
+
+    review = runtime.prepare_approval_review(paused)
+    record = runtime.commit_approval(paused, review.review_id)
+
+    assert paused.status is RuntimeOutcomeStatus.WAITING_FOR_APPROVAL
+    assert paused.task.state is RuntimeState.WAITING_FOR_APPROVAL
+    assert review.plan_hash == record.plan_hash
+    assert record.approver == "local-owner"
+    assert trace.calls == ["context", "planner", "policy"]
+    assert not any(call in {"executor", "tool", "verifier"} for call in trace.calls)
+    with pytest.raises(ApprovalResumeUnavailableError, match="Phase 5"):
+        runtime.run(paused.task)
+
+
+def test_phase4_reject_approval_audits_review_and_closes_runtime() -> None:
+    trace = Trace()
+    runtime = make_runtime(
+        trace,
+        approval_requirement=PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL,
+    )
+    paused = runtime.run(Task(request=SUPPORTED_REQUEST))
+    review = runtime.prepare_approval_review(paused)
+
+    rejected = runtime.reject_approval(paused, review.review_id)
+
+    assert rejected.status is RuntimeOutcomeStatus.FAILED
+    assert rejected.failure is not None
+    assert rejected.failure.code == "human_rejected"
+    assert trace.calls == ["context", "planner", "policy"]
+
+
+def test_phase4_commit_rebinds_review_to_the_exact_waiting_outcome() -> None:
+    first_trace = Trace()
+    first_runtime = make_runtime(
+        first_trace,
+        approval_requirement=PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL,
+    )
+    first = first_runtime.run(Task(request=SUPPORTED_REQUEST))
+    review = first_runtime.prepare_approval_review(first)
+
+    second_trace = Trace()
+    second_runtime = make_runtime(
+        second_trace,
+        approval_requirement=PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL,
+    )
+    second = second_runtime.run(Task(request=SUPPORTED_REQUEST))
+
+    with pytest.raises(ApprovalStateError):
+        first_runtime.commit_approval(second, review.review_id)
+    assert first_trace.calls == ["context", "planner", "policy"]
+    assert second_trace.calls == ["context", "planner", "policy"]
+
+
+def test_phase4_reject_rebinds_review_to_the_exact_waiting_outcome() -> None:
+    trace = Trace()
+    runtime = make_runtime(
+        trace,
+        approval_requirement=PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL,
+    )
+    first = runtime.run(Task(request=SUPPORTED_REQUEST))
+    second = runtime.run(Task(request=SUPPORTED_REQUEST))
+    first_review = runtime.prepare_approval_review(first)
+    second_review = runtime.prepare_approval_review(second)
+
+    with pytest.raises(ApprovalStateError):
+        runtime.reject_approval(first, second_review.review_id)
+
+    assert all(
+        event.kind is not ApprovalAuditEventKind.PLAN_APPROVAL_REJECTED
+        for event in runtime._approval.events
+    )
+    rejected = runtime.reject_approval(first, first_review.review_id)
+    assert rejected.failure is not None
+    assert rejected.failure.code == "human_rejected"
+
+
+def test_phase4_approval_methods_reject_nonwaiting_outcomes() -> None:
+    completed = RuntimeEngine().run(Task(request=SUPPORTED_REQUEST))
+
+    with pytest.raises(InvalidRuntimeOutcomeError):
+        RuntimeEngine().prepare_approval_review(completed)
 
 
 def test_reject_only_accepts_valid_waiting_outcome() -> None:

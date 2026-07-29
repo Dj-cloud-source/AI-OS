@@ -226,6 +226,13 @@ Approval Engine 不决定权限，也不能降低 Policy 输出的
 `NOT_REQUIRED` 会被记录并立即通过；只有 Policy 要求人工审批时才暂停等待。
 `Commit` 是创建 Execution Plan Approval 的人工 CLI 动作，不是第三种授权对象。
 
+Phase 4 的 Approval Engine 只维护当前进程内的 Review Session、不可变授权记录和
+追加式审计事件。固定 Operator 是 `local-user`，固定本地控制面 Approver 和 L3
+Confirmer 是 `local-owner`。这只是单用户本地信任声明，不是密码学身份认证。
+Review Session 和 Plan Approval 的最大有效期均为 300 秒，L3 Manual
+Confirmation 的最大有效期为 30 秒；数值来自受审 Policy Profile，CLI、模型和
+环境变量不能扩大。
+
 L2：
 
 - 需要显式人工 Approval/Commit。
@@ -247,8 +254,9 @@ L2 和 L3 的授权都绑定：
 Plan、Step 或 Arguments 发生任何变化，或者授权过期，都必须重新审批。
 模型、Skill、Memory 和历史成功记录都不能降低审批要求。
 
-当前 MVP 在一次性 L3 Manual Confirmation 协议实现并测试前，必须拒绝 L3
-执行。
+Phase 4 实现和隔离测试一次性 L3 Manual Confirmation 协议，但不连接 Executor。
+在 Phase 5 将确认消费与精确 invocation dispatch 紧邻、原子接线并测试前，生产
+Policy 仍必须拒绝 L3 执行。
 
 Execution Plan Approval 只授权一份精确的生产执行计划。它与 Skill Review
 Approval 是不同的审批对象，两者不能互相替代。
@@ -279,6 +287,15 @@ Policy 可以提高限制，但模型、Skill 和历史经验不能降低 Tool M
 
 Execution Plan Approval 绑定不可变 Plan Snapshot。Plan 使用 UTF-8 RFC 8785
 canonical JSON 和 SHA-256 生成 Plan Hash。
+
+当前简化 ExecutionPlan 不直接作为 Hash 输入。Phase 4 从严格 Plan、
+PolicyDecision 和冻结 Registry Metadata 确定性构建
+`PlanApprovalSnapshot`，补齐完整 TargetReference、明确顺序、Target Scope、
+Side Effects、Arguments Hash、Registry Risk/Redaction/Verification/Rollback
+元数据，以及当前明确为空的 Skill provenance 和 limitations。该快照是唯一 Plan
+Hash 输入。
+Approval Engine 私有内存保留精确、安全可审阅的快照；ApprovalRecord、普通日志和
+审计事件只保存 Plan Hash 与有序 Arguments Hash commitment，不保存原始参数。
 
 Hash 覆盖所有向审批人展示且可能影响行为的 Plan 内容，至少包括：
 
@@ -684,9 +701,11 @@ EXECUTING
 
 `WAITING_FOR_APPROVAL` 是唯一正式名称，表示统一审批决策门。Policy 输出
 `NOT_REQUIRED` 时，Runtime 进入该状态、记录可审计的 Approval Decision，并立即
-进入 `EXECUTING`，不等待人工。L2/L3 必须停留并等待相应授权；任何风险等级都不能
-绕过 Policy 或审计。L3 的即时确认在每个具体 Tool 调用前执行，不属于
-`WAITING_FOR_APPROVAL → EXECUTING` 的状态迁移条件。
+进入 `EXECUTING`，不等待人工。Phase 4 可以在当前进程签发 L2/L3 Plan
+Approval，但 Task 仍停留在 `WAITING_FOR_APPROVAL`；只有 Phase 5 可以把原子验证
+和消费接到 `EXECUTING`。任何风险等级都不能绕过 Policy 或审计。L3 的即时确认在
+每个具体 Tool 调用前执行，不属于 `WAITING_FOR_APPROVAL → EXECUTING` 的状态迁移
+条件。
 
 当前终态：
 

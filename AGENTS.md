@@ -386,8 +386,9 @@ Risk level belongs to Tool metadata.
 
 Never let the LLM classify risk dynamically.
 
-Until the per-invocation, one-time L3 confirmation protocol is implemented and
-tested, Policy must deny every L3 execution.
+Until Phase 5 atomically connects the Phase 4 per-invocation, one-time L3
+confirmation protocol to the exact Tool dispatch boundary and tests that
+connection, Policy must deny every L3 execution.
 
 For a multi-step Plan, effective risk is at least the maximum authoritative
 Tool risk among its Steps. Policy may raise restrictions but never lower them.
@@ -402,6 +403,12 @@ Any change to approved content invalidates the approval. An expired approval
 must never authorize execution.
 
 Plan Hash canonicalization and coverage are defined in `docs/ARCHITECTURE.md`.
+
+Phase 4 Approval is process-local only. Review Session and Plan Approval TTLs
+are capped at 300 seconds and L3 Manual Confirmation at 30 seconds by a
+reviewed Policy Profile. Operator is `local-user`; only the fixed local control
+identity `local-owner` may Commit or Confirm. Phase 4 does not resume a
+human-approved Plan or dispatch a Tool.
 
 ---
 

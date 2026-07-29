@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from ai_server.models.execution import ExecutionPlan, ExecutionStep
 from ai_server.models.policy import (
+    ApprovalConstraints,
     ManualConfirmationRequirement,
     PolicyApprovalRequirement,
     PolicyCapabilityRule,
@@ -51,6 +52,11 @@ class PolicyEngine:
         artifacts = load_policy_artifacts(self._metadata)
         self._profile = artifacts.profile
         self._policy_hash = artifacts.profile_hash
+        if artifacts.approval_constraints is None:
+            raise PolicyConfigurationError(
+                "Active Policy Profile does not define approval constraints"
+            )
+        self._approval_constraints = artifacts.approval_constraints
 
     @property
     def policy_id(self) -> str:
@@ -66,6 +72,11 @@ class PolicyEngine:
     def policy_hash(self) -> str:
         """Return the reviewed RFC 8785 canonical Policy Profile hash."""
         return self._policy_hash
+
+    @property
+    def approval_constraints(self) -> ApprovalConstraints:
+        """Return immutable reviewed approval lifetime constraints."""
+        return self._approval_constraints
 
     def evaluate(
         self,

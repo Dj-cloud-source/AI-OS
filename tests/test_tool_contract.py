@@ -265,6 +265,9 @@ def test_tool_contract_and_projection_are_strict_frozen_models() -> None:
         risk_level=contract.risk_level,
         side_effects=contract.side_effects,
         target_scope=contract.target_scope,
+        redaction=contract.redaction,
+        verification=contract.verification,
+        rollback=contract.rollback,
         timeout_ms=contract.timeout_ms,
         idempotent=contract.idempotent,
         input_schema_id="urn:ai-server:tool:get_system_status:1.0.0:input",
@@ -295,7 +298,13 @@ def test_tool_contract_and_projection_are_strict_frozen_models() -> None:
                 "risk_override": "L3",
             }
         )
-    for required_projection in ("side_effects", "target_scope"):
+    for required_projection in (
+        "side_effects",
+        "target_scope",
+        "redaction",
+        "verification",
+        "rollback",
+    ):
         incomplete = metadata.model_dump(mode="python")
         incomplete.pop(required_projection)
         with pytest.raises(ValidationError):

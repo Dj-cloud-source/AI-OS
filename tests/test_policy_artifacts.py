@@ -1,6 +1,7 @@
 import json
 import shutil
 from collections.abc import Callable, Mapping
+from hashlib import sha256
 from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any, cast
@@ -83,6 +84,12 @@ def test_load_policy_artifacts_accepts_reviewed_default_profile() -> None:
 
     assert artifacts.profile.policy_id == DEFAULT_POLICY_ID
     assert artifacts.profile.version == DEFAULT_POLICY_VERSION
+    assert artifacts.profile.profile_schema_version == "2"
+    assert artifacts.profile.approval_constraints is not None
+    assert artifacts.approval_constraints is artifacts.profile.approval_constraints
+    assert artifacts.approval_constraints.review_session_ttl_seconds == 300
+    assert artifacts.approval_constraints.plan_approval_ttl_seconds == 300
+    assert artifacts.approval_constraints.l3_confirmation_ttl_seconds == 30
     assert artifacts.review_record.content_hash == artifacts.profile_hash
     assert artifacts.review_record.status == "active"
     assert rule.operator_id == "local-user"
@@ -95,6 +102,95 @@ def test_load_policy_artifacts_accepts_reviewed_default_profile() -> None:
     metadata = authoritative_metadata()[(rule.tool_id, rule.tool_version)]
     assert rule.contract_hash == metadata.contract_hash
     assert rule.implementation_hash == metadata.implementation_hash
+
+
+def test_historical_v1_profile_remains_loadable_and_unchanged() -> None:
+    artifacts = load_policy_artifacts(
+        authoritative_metadata(),
+        policy_id="local-default",
+        version="1.0.0",
+    )
+    historical_root = SOURCE_ARTIFACT_PACKAGE / "local-default" / "1.0.0"
+
+    assert artifacts.profile.profile_schema_version == "1"
+    assert artifacts.profile.version == "1.0.0"
+    assert artifacts.approval_constraints is None
+    assert artifacts.profile_hash == (
+        "b12a3926a732b08e18c0b2f2b2709d42c22216bb6009e539e3feb1e4d4f1a2e6"
+    )
+    assert sha256((historical_root / "profile.json").read_bytes()).hexdigest() == (
+        "651317c72325da08f7bb65f8347517c3f42eec09c8a04474cc9934132574308a"
+    )
+    assert sha256((historical_root / "review-record.json").read_bytes()).hexdigest() == (
+        "6cde8886dbefc3d4c6b58511097d72d906309e79e9fe96eaaea861effc44d4e0"
+    )
+
+
+def test_v2_profile_accepts_only_shorter_reviewed_ttl_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_root = make_policy_sandbox(tmp_path, monkeypatch)
+    profile_path = artifact_root / "profile.json"
+    profile = read_json(profile_path)
+    constraints = cast(dict[str, Any], profile["approval_constraints"])
+    constraints.update(
+        {
+            "review_session_ttl_seconds": 60,
+            "plan_approval_ttl_seconds": 120,
+            "l3_confirmation_ttl_seconds": 15,
+        }
+    )
+    write_json(profile_path, profile)
+    rebind_review_hash(artifact_root)
+
+    artifacts = load_default()
+
+    assert artifacts.approval_constraints is not None
+    assert artifacts.approval_constraints.review_session_ttl_seconds == 60
+    assert artifacts.approval_constraints.plan_approval_ttl_seconds == 120
+    assert artifacts.approval_constraints.l3_confirmation_ttl_seconds == 15
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("review_session_ttl_seconds", 301),
+        ("plan_approval_ttl_seconds", 301),
+        ("l3_confirmation_ttl_seconds", 31),
+    ],
+)
+def test_v2_profile_rejects_ttl_above_safe_maximum(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: int,
+) -> None:
+    artifact_root = make_policy_sandbox(tmp_path, monkeypatch)
+    profile_path = artifact_root / "profile.json"
+    profile = read_json(profile_path)
+    constraints = cast(dict[str, Any], profile["approval_constraints"])
+    constraints[field] = value
+    write_json(profile_path, profile)
+    rebind_review_hash(artifact_root)
+
+    with pytest.raises(PolicyConfigurationError):
+        load_default()
+
+
+def test_profile_schema_version_selects_exact_normative_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_root = make_policy_sandbox(tmp_path, monkeypatch)
+    profile_path = artifact_root / "profile.json"
+    profile = read_json(profile_path)
+    profile["profile_schema_version"] = "1"
+    write_json(profile_path, profile)
+    rebind_review_hash(artifact_root)
+
+    with pytest.raises(PolicyConfigurationError):
+        load_default()
 
 
 def test_profile_formatting_and_order_do_not_change_rfc8785_hash(

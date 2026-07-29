@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-server:policy:profile:2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "profile_schema_version",
+    "policy_id",
+    "version",
+    "rules",
+    "approval_constraints"
+  ],
+  "properties": {
+    "profile_schema_version": {
+      "const": "2"
+    },
+    "policy_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "version": {
+      "$ref": "#/$defs/version"
+    },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": {
+        "$ref": "#/$defs/capabilityRule"
+      }
+    },
+    "approval_constraints": {
+      "$ref": "#/$defs/approvalConstraints"
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]*$"
+    },
+    "toolId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "version": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_id",
+        "resource_type",
+        "resource_id"
+      ],
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "resource_type": {
+          "$ref": "#/$defs/identifier"
+        },
+        "resource_id": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "capabilityRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rule_id",
+        "operator_id",
+        "target",
+        "tool_id",
+        "tool_version",
+        "contract_hash",
+        "implementation_hash",
+        "minimum_approval"
+      ],
+      "properties": {
+        "rule_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "operator_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "tool_id": {
+          "$ref": "#/$defs/toolId"
+        },
+        "tool_version": {
+          "$ref": "#/$defs/version"
+        },
+        "contract_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "implementation_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "minimum_approval": {
+          "enum": [
+            "NOT_REQUIRED",
+            "HUMAN_PLAN_APPROVAL"
+          ]
+        }
+      }
+    },
+    "approvalConstraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "review_session_ttl_seconds",
+        "plan_approval_ttl_seconds",
+        "l3_confirmation_ttl_seconds"
+      ],
+      "properties": {
+        "review_session_ttl_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        },
+        "plan_approval_ttl_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        },
+        "l3_confirmation_ttl_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        }
+      }
+    }
+  }
+}

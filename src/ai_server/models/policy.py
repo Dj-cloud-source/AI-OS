@@ -96,19 +96,34 @@ class PolicyCapabilityRule(BaseModel):
     minimum_approval: PolicyApprovalRequirement
 
 
+class ApprovalConstraints(BaseModel):
+    """Reviewed upper-bounded lifetimes for local approval evidence."""
+
+    model_config = _STRICT_FROZEN_CONFIG
+
+    review_session_ttl_seconds: int = Field(ge=1, le=300)
+    plan_approval_ttl_seconds: int = Field(ge=1, le=300)
+    l3_confirmation_ttl_seconds: int = Field(ge=1, le=30)
+
+
 class PolicyProfile(BaseModel):
     """Versioned immutable collection of exact Policy capability rules."""
 
     model_config = _STRICT_FROZEN_CONFIG
 
-    profile_schema_version: Literal["1"] = "1"
+    profile_schema_version: Literal["1", "2"] = "1"
     policy_id: BoundedIdentifier
     version: SemanticVersion
     rules: tuple[PolicyCapabilityRule, ...] = Field(min_length=1, max_length=10_000)
+    approval_constraints: ApprovalConstraints | None = None
 
     @model_validator(mode="after")
     def validate_unique_rules(self) -> Self:
-        """Reject duplicate rule IDs and duplicate exact capabilities."""
+        """Reject invalid version fields and duplicate exact capabilities."""
+        if self.profile_schema_version == "1" and self.approval_constraints is not None:
+            raise ValueError("Policy Profile Schema v1 cannot define approval constraints")
+        if self.profile_schema_version == "2" and self.approval_constraints is None:
+            raise ValueError("Policy Profile Schema v2 requires approval constraints")
         rule_ids = tuple(rule.rule_id for rule in self.rules)
         if len(rule_ids) != len(set(rule_ids)):
             raise ValueError("Policy rule IDs must be unique")
@@ -332,6 +347,7 @@ class PolicyDecision(BaseModel):
 
 
 __all__ = [
+    "ApprovalConstraints",
     "ManualConfirmationRequirement",
     "PolicyApprovalRequirement",
     "PolicyCapabilityRule",

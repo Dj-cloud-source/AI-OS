@@ -305,15 +305,27 @@ execution does not begin within the Policy-configured confirmation window.
 It is single-use and binds the Execution Approval ID, Plan Hash, exact Tool
 Step, concrete Arguments, and expiration. Replay or reuse is forbidden.
 
+The reviewed local Policy Profile v1.1 uses Profile Schema v2 to provide
+bounded Approval configuration: Review Session and Plan Approval TTLs are at
+most 300 seconds, and the L3 Manual Confirmation TTL is at most 30 seconds.
+Planner, model output, CLI flags, and environment variables cannot increase
+these values.
+
 The Effective Plan Risk is at least the maximum authoritative risk among its
 ordered Tool Steps. Policy may raise the requirement for target scope or
-combined side effects, but cannot lower it. The current MVP rejects L3
-execution until this confirmation protocol is implemented and tested.
+combined side effects, but cannot lower it. Phase 4 implements the confirmation
+record and consumption protocol without dispatch. L3 execution remains denied
+until Phase 5 atomically connects confirmation consumption to the exact
+invocation boundary and tests that connection.
 
 An execution approval binds:
 
 - the exact Plan Hash
-- the concrete Tool Arguments
+- the concrete ordered Tool Arguments and their canonical Hash commitments
+- exact Tool identity, Contract Hash, and Implementation Hash
+- target, Registry risk, target scope, side effects, redaction, Verification,
+  and rollback requirements
+- the applicable Policy Decision Hash and approval requirements
 - the Expiration
 
 Any plan or argument change invalidates approval. Expired approval is invalid.

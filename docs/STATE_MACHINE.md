@@ -43,10 +43,11 @@ records the audited decision and exits the state immediately without waiting
 for a human. When Policy requires Human Execution Approval, Runtime remains in
 the state until an exact-plan decision is available.
 
-`WAITING_FOR_APPROVAL → EXECUTING` is the governed target transition for the
-Approval phase. Until Phase 4 implements and tests Approval Record validation,
-approval-paused work must remain non-resumable or enter `FAILED`; Runtime must
-not simulate an approval.
+`WAITING_FOR_APPROVAL → EXECUTING` is the governed target transition. Phase 4
+may issue and validate an in-process Approval Record, but the Task remains
+paused. Phase 5 must atomically validate and consume that authorization at the
+Executor boundary before this transition becomes reachable for
+human-approval-required work. Runtime must not simulate an approval.
 
 ## Policy and Approval Authority
 
@@ -72,8 +73,9 @@ not a third approval object.
 - L3 requires explicit human Approval/Commit plus an immediate Manual
   Confirmation before the affected Tool invocation.
 
-The current MVP must reject L3 execution until the one-time Manual Confirmation
-protocol is implemented and tested.
+Phase 4 implements and tests the one-time Manual Confirmation protocol in
+isolation. Production L3 execution remains denied until Phase 5 atomically
+connects confirmation consumption to the exact Tool dispatch boundary.
 
 ## Approval Integrity
 
@@ -82,7 +84,7 @@ Execution Plan Approval binds:
 - Approval ID;
 - exact Plan Hash;
 - concrete ordered Steps;
-- Tool ID, Version, and Contract Hash for every Step;
+- Tool ID, Version, Contract Hash, and Implementation Hash for every Step;
 - exact target references and Arguments;
 - Verification and Rollback requirements;
 - Expiration;
@@ -103,18 +105,20 @@ reduce these requirements.
 | `POLICY_CHECK` | Policy allows and requires human approval | Enter `WAITING_FOR_APPROVAL` and pause |
 | `POLICY_CHECK` | Policy denies | Enter `FAILED` with a structured reason |
 | `WAITING_FOR_APPROVAL` | Valid `NOT_REQUIRED` decision | Enter `EXECUTING` immediately; no human action |
-| `WAITING_FOR_APPROVAL` | Valid L2 approval | Enter `EXECUTING` |
-| `WAITING_FOR_APPROVAL` | Valid L3 Execution Plan Approval | Enter `EXECUTING`; each L3 invocation remains blocked by its own immediate confirmation gate |
+| `WAITING_FOR_APPROVAL` | Valid L2 approval during Phase 4 | Record authorization and remain paused; Phase 5 owns execution resumption |
+| `WAITING_FOR_APPROVAL` | Valid L3 Execution Plan Approval during Phase 4 | Record authorization and remain paused; production L3 Policy denial remains active |
 | `WAITING_FOR_APPROVAL` | Approval rejected | Enter `FAILED` with `human_rejected` |
 | `WAITING_FOR_APPROVAL` | Approval expires | Remain paused; the expired record cannot be reused |
-| `WAITING_FOR_APPROVAL` | Human requests changes | End the current attempt as `FAILED`; create a linked new attempt with a new Plan Hash |
+| `WAITING_FOR_APPROVAL` | Human requests changes during Phase 4 | End the current attempt as `FAILED`; linked replanning is deferred to its owning later phase |
 | `WAITING_FOR_APPROVAL` | Approved snapshot or Hash is altered | Enter `FAILED`; never silently recalculate and continue |
 
 For a future plan containing multiple L3 Steps, every L3 invocation requires a
 single-use confirmation bound to the same Approval ID, Plan Hash, Step,
 Arguments, and short expiration. Confirmation is an execution gate event, not a
-new source of permission and not a Runtime state transition. The current MVP
-denies L3 before execution because this per-invocation gate is not implemented.
+new source of permission and not a Runtime state transition. Phase 4 can issue
+and consume these records only against a fake boundary. Production Policy
+denies L3 until Phase 5 makes confirmation consumption and dispatch one
+adjacent, tested execution boundary.
 
 ## Context Collection Boundary
 
