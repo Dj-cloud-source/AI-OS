@@ -1,7 +1,10 @@
 """Deterministic validation and result-envelope boundary for registered Tools."""
 
 from collections.abc import Callable
+from dataclasses import dataclass
+from enum import StrEnum
 from time import monotonic_ns
+from types import MappingProxyType
 from typing import ClassVar, cast
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -29,10 +32,28 @@ from ai_server.tools.registry import (
 Clock = Callable[[], int]
 
 
+class GatewayDispatchStatus(StrEnum):
+    """State whether the registered Tool handler has been entered."""
+
+    NOT_DISPATCHED = "not_dispatched"
+    HANDLER_DISPATCHED = "handler_dispatched"
+
+
+@dataclass(frozen=True, slots=True)
+class GatewayDispatchReceipt:
+    """Bind one trusted Tool result to authoritative dispatch-side facts."""
+
+    result: ToolResult[BaseModel]
+    dispatch_status: GatewayDispatchStatus
+    mutates_remote_state: bool
+
+
 class ToolGatewayError(Exception):
     """Base class for failures without a trustworthy ToolCall envelope."""
 
     code: ClassVar[str] = "tool_gateway_error"
+    dispatch_status: GatewayDispatchStatus = GatewayDispatchStatus.NOT_DISPATCHED
+    mutates_remote_state: bool | None = None
 
 
 class InvalidToolCallError(ToolGatewayError):
@@ -54,9 +75,21 @@ class ToolResolutionError(ToolGatewayError):
 
 
 class ToolIntegrityError(ToolGatewayError):
-    """Raised before invocation when immutable Tool hashes do not match."""
+    """Raised when immutable Tool identity or result integrity cannot be trusted."""
 
     code: ClassVar[str] = "tool_integrity"
+
+
+class PostDispatchToolIntegrityError(ToolIntegrityError):
+    """Report an unsafe result-envelope failure after handler dispatch."""
+
+    code: ClassVar[str] = "post_dispatch_tool_integrity"
+    dispatch_status: GatewayDispatchStatus = GatewayDispatchStatus.HANDLER_DISPATCHED
+
+    def __init__(self, message: str, *, mutates_remote_state: bool) -> None:
+        """Record authoritative side-effect metadata without leaking failure data."""
+        super().__init__(message)
+        self.mutates_remote_state = mutates_remote_state
 
 
 class ToolGateway:
@@ -85,6 +118,67 @@ class ToolGateway:
         call: ToolCall[ArgumentsT],
     ) -> ToolResult[BaseModel]:
         """Validate, dispatch once, and return a trusted structured result."""
+        return self._invoke_with_receipt(call).result
+
+    def validate_result[ArgumentsT: BaseModel, PayloadT: BaseModel](
+        self,
+        call: ToolCall[ArgumentsT],
+        result: ToolResult[PayloadT],
+    ) -> bool:
+        """Validate retained result evidence against one exact call without dispatch."""
+        try:
+            trusted_call = _validate_call(call)
+            registered = self._registry._resolve(
+                trusted_call.tool_id,
+                trusted_call.tool_version,
+            )
+            if (
+                trusted_call.contract_hash != registered.metadata.contract_hash
+                or trusted_call.implementation_hash != registered.metadata.implementation_hash
+            ):
+                return False
+            arguments = _validate_arguments(trusted_call, registered)
+            if (
+                arguments is None
+                or not _target_matches_contract(
+                    trusted_call.target,
+                    arguments,
+                    registered,
+                )
+                or canonical_json_sha256(arguments) != trusted_call.arguments_hash
+            ):
+                return False
+            validated_result = _validate_retained_result(result, registered)
+            if validated_result is None or not _result_identity_matches_call(
+                validated_result,
+                trusted_call,
+            ):
+                return False
+            result_document = cast(
+                dict[str, JsonValue],
+                validated_result.model_dump(mode="json", warnings="error"),
+            )
+            if (
+                validated_result.duration_ms > registered.metadata.timeout_ms
+                or _contains_forbidden_content(result_document)
+                or not result_matches_contract(result_document, registered.contract)
+            ):
+                return False
+            if validated_result.success:
+                payload = _validate_payload(validated_result.data, registered)
+                expected_evidence = None if payload is None else _safe_evidence(payload, registered)
+                return (
+                    expected_evidence is not None and validated_result.evidence == expected_evidence
+                )
+            return _failure_matches_contract(validated_result, registered)
+        except BaseException:
+            return False
+
+    def _invoke_with_receipt[ArgumentsT: BaseModel](
+        self,
+        call: ToolCall[ArgumentsT],
+    ) -> GatewayDispatchReceipt:
+        """Invoke once and retain internal handler-dispatch and side-effect facts."""
         trusted_call = _validate_call(call)
 
         try:
@@ -107,7 +201,7 @@ class ToolGateway:
 
         arguments = _validate_arguments(trusted_call, registered)
         if arguments is None:
-            return _failure_result(
+            return _pre_dispatch_failure_receipt(
                 trusted_call,
                 registered,
                 code="invalid_arguments",
@@ -117,7 +211,7 @@ class ToolGateway:
             arguments,
             registered,
         ):
-            return _failure_result(
+            return _pre_dispatch_failure_receipt(
                 trusted_call,
                 registered,
                 code="target_not_allowed",
@@ -126,19 +220,19 @@ class ToolGateway:
         try:
             computed_arguments_hash = canonical_json_sha256(arguments)
         except (CanonicalizationError, TypeError, ValueError):
-            return _failure_result(
+            return _pre_dispatch_failure_receipt(
                 trusted_call,
                 registered,
                 code="invalid_arguments",
             )
         except BaseException:
-            return _failure_result(
+            return _pre_dispatch_failure_receipt(
                 trusted_call,
                 registered,
                 code="invalid_arguments",
             )
         if computed_arguments_hash != trusted_call.arguments_hash:
-            return _failure_result(
+            return _pre_dispatch_failure_receipt(
                 trusted_call,
                 registered,
                 code="arguments_hash_mismatch",
@@ -146,7 +240,7 @@ class ToolGateway:
 
         start_ns = _read_clock(self._clock)
         if start_ns is None:
-            return _failure_result(
+            return _pre_dispatch_failure_receipt(
                 trusted_call,
                 registered,
                 code="gateway_clock_failed",
@@ -161,7 +255,7 @@ class ToolGateway:
 
         end_ns = _read_clock(self._clock)
         if end_ns is None or end_ns < start_ns:
-            return _failure_result(
+            return _post_dispatch_failure_receipt(
                 trusted_call,
                 registered,
                 code="gateway_clock_failed",
@@ -170,14 +264,14 @@ class ToolGateway:
         elapsed_ns = end_ns - start_ns
         duration_ms = _duration_ms(elapsed_ns)
         if elapsed_ns > metadata.timeout_ms * 1_000_000:
-            return _failure_result(
+            return _post_dispatch_failure_receipt(
                 trusted_call,
                 registered,
                 code="tool_timeout",
                 duration_ms=metadata.timeout_ms,
             )
         if execution_failed:
-            return _failure_result(
+            return _post_dispatch_failure_receipt(
                 trusted_call,
                 registered,
                 code="tool_execution_failed",
@@ -186,7 +280,7 @@ class ToolGateway:
 
         validated_payload = _validate_payload(payload, registered)
         if validated_payload is None:
-            return _failure_result(
+            return _post_dispatch_failure_receipt(
                 trusted_call,
                 registered,
                 code="malformed_tool_output",
@@ -194,39 +288,47 @@ class ToolGateway:
             )
         evidence = _safe_evidence(validated_payload, registered)
         if evidence is None:
-            return _failure_result(
+            return _post_dispatch_failure_receipt(
                 trusted_call,
                 registered,
                 code="result_redaction_failed",
                 duration_ms=duration_ms,
             )
 
-        result = ToolResult[BaseModel](
-            invocation_id=trusted_call.invocation_id,
-            plan_step_id=trusted_call.plan_step_id,
-            tool_id=trusted_call.tool_id,
-            tool_version=trusted_call.tool_version,
-            contract_hash=trusted_call.contract_hash,
-            arguments_hash=trusted_call.arguments_hash,
-            target=trusted_call.target,
-            success=True,
-            data=validated_payload,
-            evidence=evidence,
-            error=None,
-            duration_ms=duration_ms,
-        )
-        result_document = result.model_dump(mode="json", warnings="error")
-        if not result_matches_contract(
-            cast(dict[str, JsonValue], result_document),
-            registered.contract,
-        ):
-            return _failure_result(
+        try:
+            result = ToolResult[BaseModel](
+                invocation_id=trusted_call.invocation_id,
+                plan_step_id=trusted_call.plan_step_id,
+                tool_id=trusted_call.tool_id,
+                tool_version=trusted_call.tool_version,
+                contract_hash=trusted_call.contract_hash,
+                arguments_hash=trusted_call.arguments_hash,
+                target=trusted_call.target,
+                success=True,
+                data=validated_payload,
+                evidence=evidence,
+                error=None,
+                duration_ms=duration_ms,
+            )
+            result_document = result.model_dump(mode="json", warnings="error")
+            result_is_valid = result_matches_contract(
+                cast(dict[str, JsonValue], result_document),
+                registered.contract,
+            )
+        except BaseException:
+            result_is_valid = False
+        if not result_is_valid:
+            return _post_dispatch_failure_receipt(
                 trusted_call,
                 registered,
                 code="malformed_tool_output",
                 duration_ms=duration_ms,
             )
-        return result
+        return _receipt(
+            result,
+            registered,
+            dispatch_status=GatewayDispatchStatus.HANDLER_DISPATCHED,
+        )
 
 
 def _validate_call[ArgumentsT: BaseModel](
@@ -236,7 +338,29 @@ def _validate_call[ArgumentsT: BaseModel](
         raise InvalidToolCallError("Tool Gateway received a malformed ToolCall")
     try:
         call_model = type(call)
-        validated = call_model.model_validate(
+        generic_metadata = getattr(call_model, "__pydantic_generic_metadata__", None)
+        if type(generic_metadata) is not dict:
+            raise TypeError
+        arguments_types = generic_metadata.get("args")
+        if (
+            generic_metadata.get("origin") is not ToolCall
+            or type(arguments_types) is not tuple
+            or len(arguments_types) != 1
+            or not isinstance(arguments_types[0], type)
+            or not issubclass(arguments_types[0], BaseModel)
+            or generic_metadata.get("parameters") != ()
+        ):
+            raise TypeError
+        model_factory = getattr(ToolCall, "__class_getitem__", None)
+        if not callable(model_factory):
+            raise TypeError
+        canonical_model = cast(
+            type[BaseModel],
+            model_factory(arguments_types[0]),
+        )
+        if call_model is not canonical_model:
+            raise TypeError
+        validated = canonical_model.model_validate(
             call.model_dump(mode="python", warnings="error"),
             strict=True,
         )
@@ -284,6 +408,104 @@ def _validate_payload(
         return validated
     except BaseException:
         return None
+
+
+def _validate_retained_result[PayloadT: BaseModel](
+    result: ToolResult[PayloadT],
+    registered: _RegisteredTool,
+) -> ToolResult[BaseModel] | None:
+    try:
+        result_model = type(result)
+        generic_metadata = getattr(result_model, "__pydantic_generic_metadata__", None)
+        if type(generic_metadata) is not dict:
+            return None
+        payload_types = generic_metadata.get("args")
+        if (
+            generic_metadata.get("origin") is not ToolResult
+            or type(payload_types) is not tuple
+            or len(payload_types) != 1
+            or payload_types[0] not in {BaseModel, registered.output_model}
+            or generic_metadata.get("parameters") != ()
+        ):
+            return None
+        model_factory = getattr(ToolResult, "__class_getitem__", None)
+        if not callable(model_factory):
+            return None
+        canonical_input_model = cast(type[BaseModel], model_factory(payload_types[0]))
+        if result_model is not canonical_input_model:
+            return None
+        if (
+            type(result.target) is not TargetReference
+            or not _is_frozen_json_object(result.evidence)
+            or (result.error is not None and type(result.error) is not ToolError)
+            or (result.data is not None and type(result.data) is not registered.output_model)
+        ):
+            return None
+        canonical_output_model = cast(
+            type[BaseModel],
+            model_factory(registered.output_model),
+        )
+        validated = canonical_output_model.model_validate(
+            result.model_dump(mode="python", warnings="error"),
+            strict=True,
+        )
+        return cast(ToolResult[BaseModel], validated)
+    except BaseException:
+        return None
+
+
+def _is_frozen_json_object(value: object) -> bool:
+    if type(value) is not MappingProxyType:
+        return False
+    mapping = cast(dict[object, object], value)
+    return all(
+        type(key) is str and _is_frozen_json_value(nested) for key, nested in mapping.items()
+    )
+
+
+def _is_frozen_json_value(value: object) -> bool:
+    if type(value) is MappingProxyType:
+        return _is_frozen_json_object(value)
+    if type(value) is tuple:
+        return all(_is_frozen_json_value(nested) for nested in cast(tuple[object, ...], value))
+    return value is None or type(value) in {bool, int, float, str}
+
+
+def _result_identity_matches_call(
+    result: ToolResult[BaseModel],
+    call: ToolCall[BaseModel],
+) -> bool:
+    return (
+        result.invocation_id == call.invocation_id
+        and result.plan_step_id == call.plan_step_id
+        and result.tool_id == call.tool_id
+        and result.tool_version == call.tool_version
+        and result.contract_hash == call.contract_hash
+        and result.arguments_hash == call.arguments_hash
+        and result.target == call.target
+    )
+
+
+def _failure_matches_contract(
+    result: ToolResult[BaseModel],
+    registered: _RegisteredTool,
+) -> bool:
+    if result.data is not None or result.evidence != {} or type(result.error) is not ToolError:
+        return False
+    definition = next(
+        (
+            candidate
+            for candidate in registered.contract.errors
+            if candidate.code == result.error.code
+        ),
+        None,
+    )
+    return (
+        definition is not None
+        and result.error.category is definition.category
+        and result.error.message == definition.message
+        and result.error.retryable is definition.retryable
+    )
 
 
 def _target_matches_contract(
@@ -358,6 +580,73 @@ def _duration_ms(elapsed_ns: int) -> int:
     return (elapsed_ns + 999_999) // 1_000_000
 
 
+def _receipt(
+    result: ToolResult[BaseModel],
+    registered: _RegisteredTool,
+    *,
+    dispatch_status: GatewayDispatchStatus,
+) -> GatewayDispatchReceipt:
+    return GatewayDispatchReceipt(
+        result=result,
+        dispatch_status=dispatch_status,
+        mutates_remote_state=registered.metadata.side_effects.mutates_remote_state,
+    )
+
+
+def _pre_dispatch_failure_receipt(
+    call: ToolCall[BaseModel],
+    registered: _RegisteredTool,
+    *,
+    code: str,
+    duration_ms: int = 0,
+) -> GatewayDispatchReceipt:
+    try:
+        result = _failure_result(
+            call,
+            registered,
+            code=code,
+            duration_ms=duration_ms,
+        )
+    except ToolGatewayError:
+        raise
+    except BaseException:
+        raise ToolIntegrityError(
+            "Registered Tool cannot represent a structured failure safely"
+        ) from None
+    return _receipt(
+        result,
+        registered,
+        dispatch_status=GatewayDispatchStatus.NOT_DISPATCHED,
+    )
+
+
+def _post_dispatch_failure_receipt(
+    call: ToolCall[BaseModel],
+    registered: _RegisteredTool,
+    *,
+    code: str,
+    duration_ms: int = 0,
+) -> GatewayDispatchReceipt:
+    mutates_remote_state = registered.metadata.side_effects.mutates_remote_state
+    try:
+        result = _failure_result(
+            call,
+            registered,
+            code=code,
+            duration_ms=duration_ms,
+        )
+    except BaseException:
+        raise PostDispatchToolIntegrityError(
+            "Post-dispatch Tool result cannot represent a structured failure safely",
+            mutates_remote_state=mutates_remote_state,
+        ) from None
+    return _receipt(
+        result,
+        registered,
+        dispatch_status=GatewayDispatchStatus.HANDLER_DISPATCHED,
+    )
+
+
 def _failure_result(
     call: ToolCall[BaseModel],
     registered: _RegisteredTool,
@@ -400,8 +689,11 @@ def _failure_result(
 
 __all__ = [
     "Clock",
+    "GatewayDispatchReceipt",
+    "GatewayDispatchStatus",
     "InvalidGatewayConfigurationError",
     "InvalidToolCallError",
+    "PostDispatchToolIntegrityError",
     "ToolIntegrityError",
     "ToolGateway",
     "ToolGatewayError",

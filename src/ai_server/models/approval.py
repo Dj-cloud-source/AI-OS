@@ -38,6 +38,7 @@ from ai_server.models.tool import (
     ToolTargetScope,
     VerificationRequirement,
 )
+from ai_server.models.verification import VerificationCriterion
 from ai_server.tools.hashing import CanonicalizationError, canonical_json_sha256
 
 _STRICT_FROZEN_CONFIG = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -345,14 +346,18 @@ class PlanApprovalSnapshot(BaseModel):
 
     model_config = _STRICT_FROZEN_CONFIG
 
-    snapshot_schema_version: Literal["1"] = "1"
-    plan_schema_version: Literal["1"]
+    snapshot_schema_version: Literal["2"] = "2"
+    plan_schema_version: Literal["2"]
     task_id: ExactUUID
     plan_id: ExactUUID
     operator_id: BoundedIdentifier
     target: TargetReference
     execution_order: tuple[str, ...] = Field(min_length=1, max_length=64)
     steps: tuple[PlanStepApprovalSnapshot, ...] = Field(min_length=1, max_length=64)
+    verification_criteria: tuple[VerificationCriterion, ...] = Field(
+        min_length=1,
+        max_length=128,
+    )
     skill_provenance: None = None
     limitations: tuple[str, ...] = Field(default=(), max_length=64)
 
@@ -366,6 +371,14 @@ class PlanApprovalSnapshot(BaseModel):
             raise ValueError("Approval step IDs must be unique")
         if tuple(step.step_index for step in self.steps) != tuple(range(len(self.steps))):
             raise ValueError("Approval step indexes must be contiguous and ordered")
+        criterion_ids = tuple(criterion.criterion_id for criterion in self.verification_criteria)
+        if len(criterion_ids) != len(set(criterion_ids)):
+            raise ValueError("Approval verification criterion IDs must be unique")
+        if any(
+            criterion.evidence_step_id not in set(step_ids)
+            for criterion in self.verification_criteria
+        ):
+            raise ValueError("Approval criteria must reference reviewed Plan Steps")
         if any(not limitation or len(limitation) > 1024 for limitation in self.limitations):
             raise ValueError("Approval limitations must be bounded non-empty strings")
         if len(self.limitations) != len(set(self.limitations)):

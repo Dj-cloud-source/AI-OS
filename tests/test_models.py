@@ -26,6 +26,7 @@ from ai_server.models.tool import (
     ToolTargetScope,
     VerificationRequirement,
 )
+from ai_server.models.verification import EqualityCriterion
 from ai_server.planner.service import Planner
 from ai_server.runtime.errors import InvalidTaskError, UnsupportedTaskError
 from ai_server.runtime.state import RuntimeState
@@ -53,6 +54,17 @@ def make_step(*, step_id: str = "status") -> ExecutionStep:
         impact="No external impact.",
         verification="Require simulated structured evidence.",
         recovery="No rollback required.",
+    )
+
+
+def make_criterion(*, step_id: str = "status") -> EqualityCriterion:
+    """Build one mandatory machine-readable Mock verification criterion."""
+    return EqualityCriterion(
+        criterion_id="mock-source",
+        evidence_step_id=step_id,
+        source="evidence",
+        field="source",
+        expected="mock",
     )
 
 
@@ -215,7 +227,12 @@ def test_phase_zero_models_are_frozen() -> None:
     step = make_step()
     arguments = GetSystemStatusArguments()
     metadata = make_tool_metadata()
-    plan = ExecutionPlan(task_id=task.task_id, target=task.target, steps=(step,))
+    plan = ExecutionPlan(
+        task_id=task.task_id,
+        target=task.target,
+        steps=(step,),
+        verification_criteria=(make_criterion(),),
+    )
     status = make_status()
     result = make_result(status)
 
@@ -237,15 +254,71 @@ def test_phase_zero_models_are_frozen() -> None:
 def test_execution_plan_requires_ordered_unique_steps() -> None:
     task_id = uuid4()
     step = make_step()
-    plan = ExecutionPlan(task_id=task_id, target="local-mock", steps=(step,))
+    plan = ExecutionPlan(
+        task_id=task_id,
+        target="local-mock",
+        steps=(step,),
+        verification_criteria=(make_criterion(),),
+    )
 
     assert isinstance(plan.steps, tuple)
     assert ExecutionPlan.model_validate_json(plan.model_dump_json()) == plan
 
     with pytest.raises(ValidationError):
-        ExecutionPlan(task_id=task_id, target="local-mock", steps=())
+        ExecutionPlan(
+            task_id=task_id,
+            target="local-mock",
+            steps=(),
+            verification_criteria=(make_criterion(),),
+        )
     with pytest.raises(ValidationError):
-        ExecutionPlan(task_id=task_id, target="local-mock", steps=(step, step))
+        ExecutionPlan(
+            task_id=task_id,
+            target="local-mock",
+            steps=(step, step),
+            verification_criteria=(make_criterion(),),
+        )
+
+
+def test_execution_plan_v2_requires_unique_step_bound_verification_criteria() -> None:
+    task_id = uuid4()
+    step = make_step()
+    criterion = make_criterion()
+
+    with pytest.raises(ValidationError):
+        ExecutionPlan(
+            task_id=task_id,
+            target="local-mock",
+            steps=(step,),
+            verification_criteria=(),
+        )
+    with pytest.raises(ValidationError, match="unique"):
+        ExecutionPlan(
+            task_id=task_id,
+            target="local-mock",
+            steps=(step,),
+            verification_criteria=(criterion, criterion),
+        )
+    with pytest.raises(ValidationError, match="planned evidence"):
+        ExecutionPlan(
+            task_id=task_id,
+            target="local-mock",
+            steps=(step,),
+            verification_criteria=(
+                criterion.model_copy(update={"evidence_step_id": "missing-step"}),
+            ),
+        )
+    with pytest.raises(ValidationError):
+        ExecutionPlan.model_validate(
+            {
+                "schema_version": "1",
+                "task_id": task_id,
+                "target": "local-mock",
+                "steps": (step,),
+                "verification_criteria": (criterion,),
+            },
+            strict=True,
+        )
 
 
 def test_tool_result_requires_typed_data_and_non_negative_duration() -> None:

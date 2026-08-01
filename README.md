@@ -3,12 +3,12 @@
 A local-first, policy-controlled Runtime for safe and testable server
 operations.
 
-Phases 0–4 provide an installable Python foundation, a fail-closed Runtime
-lifecycle, an artifact-driven Tool Protocol, and a reviewed deterministic
-Policy and process-local Approval boundary without connecting to a real server.
-Human-approved work remains paused because Phase 5 has not connected
-authorization consumption to Executor dispatch. The only registered and
-authorized Tool is the deterministic local `get_system_status@1.0.0` Mock.
+Phases 0–6 provide an installable Python foundation, a fail-closed Runtime
+lifecycle, an artifact-driven Tool Protocol, reviewed deterministic Policy,
+process-local Approval, governed same-process execution, and deterministic
+structured verification. No real server is connected. The only registered and
+authorized Tool remains the deterministic local `get_system_status@1.0.0`
+Mock.
 
 ## Current capabilities
 
@@ -20,6 +20,18 @@ authorized Tool is the deterministic local `get_system_status@1.0.0` Mock.
 - Five package-resident Tool Protocol JSON Schemas
 - Artifact-validated, immutable-after-startup Tool Registry
 - Exact-version, hash-bound Tool Gateway dispatch through Executor
+- Immutable execution-attempt authorization, ordered execution reports, and
+  per-invocation dispatch/effect certainty
+- Hash-bound attempt-closure uncertainty with explicit human-intervention
+  visibility when no trustworthy final execution report is available
+- ExecutionPlan v2 and Approval Snapshot v2 with ordered, mandatory,
+  hash-bound verification criteria
+- Pure deterministic Verifier with strict equality, numeric-bound,
+  expected-state, and health-status evaluators
+- Runtime-owned conservative evidence freshness, isolated Verifier inputs,
+  independent verdict recomputation, and exact result/effect closure
+- Hash-only verification audit records with stable failure reasons and no raw
+  evidence values
 - Versioned strict-JSON Policy Profile with an independently hash-bound local
   review record
 - Structured per-Step and aggregate Policy decisions with exact capability
@@ -29,13 +41,15 @@ authorized Tool is the deterministic local `get_system_status@1.0.0` Mock.
 - Immutable exact-plan Approval snapshots, canonical hashes, process-local
   Review/Commit records, audit events, expiration, invalidation, and one-time
   consumption protocols
-- Interactive-TTY-only `COMMIT <full-plan-hash>` / `REJECT` handling; a Commit
-  records authorization but does not resume or dispatch human-approved work
+- Interactive-TTY-only `COMMIT <full-plan-hash>` / `REJECT` handling; a valid
+  Commit resumes the exact paused outcome immediately in the same process
+- Exact interactive `CONFIRM <full-challenge-hash>` support through the
+  bundled CLI; Runtime/Executor reader injection remains a trusted test seam,
+  and the default Registry contains no L3 Tool
 - Deterministic L0 `get_system_status@1.0.0` payload-only Mock Tool
 - Explicit Planner, Policy, Executor, and Verifier boundaries
 - Immutable structured outcomes and ordered lifecycle events
-- Approval pause, exact Review/Commit, and human rejection without pre-Phase-5
-  resume
+- Approval pause, exact Review/Commit, same-process resume, and human rejection
 - Structured lifecycle and execution audit events
 - Repository-local `uv.lock` plus source, wheel, and clean-install build gates
 

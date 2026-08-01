@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
-from ai_server.models.execution import ExecutionPlan, ExecutionStep
+from ai_server.models.execution import ExecutionPlan, ExecutionStep, StepRole
 from ai_server.models.policy import (
     ApprovalConstraints,
     ManualConfirmationRequirement,
@@ -20,6 +20,13 @@ from ai_server.models.policy import (
 )
 from ai_server.models.system_status import GetSystemStatusArguments
 from ai_server.models.tool import RiskLevel, TargetReference, ToolMetadata
+from ai_server.models.verification import (
+    VERIFICATION_CRITERION_TYPES,
+    EqualityCriterion,
+    ExpectedStateCriterion,
+    HealthStatusCriterion,
+    NumericBoundsCriterion,
+)
 from ai_server.policy.artifact_loader import load_policy_artifacts
 from ai_server.policy.errors import PolicyConfigurationError, PolicyEvaluationError
 from ai_server.tools.hashing import CanonicalizationError, canonical_json_sha256
@@ -78,6 +85,12 @@ class PolicyEngine:
         """Return immutable reviewed approval lifetime constraints."""
         return self._approval_constraints
 
+    def metadata_for(self, tool_id: str, tool_version: str) -> ToolMetadata | None:
+        """Return frozen authoritative metadata for one exact registered Tool."""
+        if type(tool_id) is not str or type(tool_version) is not str:
+            return None
+        return self._metadata.get((tool_id, tool_version))
+
     def evaluate(
         self,
         plan: ExecutionPlan,
@@ -87,6 +100,7 @@ class PolicyEngine:
         trusted_plan = _validate_plan(plan)
         trusted_context = _validate_context(context)
         try:
+            self._validate_verification_boundaries(trusted_plan)
             step_decisions = tuple(
                 self._evaluate_step(trusted_plan, step, trusted_context)
                 for step in trusted_plan.steps
@@ -165,6 +179,111 @@ class PolicyEngine:
         except BaseException:
             raise PolicyEvaluationError("Policy evaluation failed safely") from None
 
+    def _validate_verification_boundaries(self, plan: ExecutionPlan) -> None:
+        """Reject criteria or verification Steps that exceed reviewed Tool contracts."""
+        steps_by_id = {step.step_id: step for step in plan.steps}
+        for criterion in plan.verification_criteria:
+            source_step = steps_by_id[criterion.evidence_step_id]
+            metadata = self._metadata.get((source_step.tool_id, source_step.tool_version))
+            if metadata is None:
+                continue
+            if (
+                type(criterion) is EqualityCriterion
+                and criterion.source == "evidence"
+                and criterion.field not in metadata.verification.evidence_fields
+            ):
+                raise PolicyEvaluationError(
+                    "Verification criterion references undeclared retained evidence"
+                )
+
+        verify_steps = tuple(step for step in plan.steps if step.role is StepRole.VERIFY)
+        source_steps = tuple(step for step in plan.steps if step.role is not StepRole.VERIFY)
+        criterion_sources = frozenset(
+            criterion.evidence_step_id for criterion in plan.verification_criteria
+        )
+        mutating_source_steps = tuple(
+            step
+            for step in source_steps
+            if (metadata := self._metadata.get((step.tool_id, step.tool_version))) is not None
+            and metadata.side_effects.mutates_remote_state
+        )
+        if any(step.role is not StepRole.ACTION for step in mutating_source_steps):
+            raise PolicyEvaluationError("Mutating source Steps must use the ACTION role")
+        if len(mutating_source_steps) > 1:
+            raise PolicyEvaluationError("Phase 6 permits at most one mutating Step per Plan")
+        for verify_step in verify_steps:
+            metadata = self._metadata.get((verify_step.tool_id, verify_step.tool_version))
+            if metadata is not None and (
+                metadata.side_effects.mutates_remote_state or metadata.risk_level is RiskLevel.L3
+            ):
+                raise PolicyEvaluationError("Verification Steps must use read-only Tools")
+            declared = any(
+                source_metadata is not None
+                and source_metadata.verification.required
+                and any(
+                    reference.tool_id == verify_step.tool_id
+                    and reference.version == verify_step.tool_version
+                    for reference in source_metadata.verification.tools
+                )
+                for source_step in source_steps
+                for source_metadata in (
+                    self._metadata.get((source_step.tool_id, source_step.tool_version)),
+                )
+            )
+            if verify_step.step_id not in criterion_sources or not declared:
+                raise PolicyEvaluationError(
+                    "Verification Steps must be declared and criterion-bound"
+                )
+
+        for step in source_steps:
+            metadata = self._metadata.get((step.tool_id, step.tool_version))
+            if metadata is None:
+                continue
+            required_tools = metadata.verification.tools
+            covered_required_tools = all(
+                any(
+                    verify_step.tool_id == reference.tool_id
+                    and verify_step.tool_version == reference.version
+                    and verify_step.step_id in criterion_sources
+                    for verify_step in verify_steps
+                )
+                for reference in required_tools
+            )
+            mutation_postconditions_cover = all(
+                any(
+                    verify_step.tool_id == reference.tool_id
+                    and verify_step.tool_version == reference.version
+                    and any(
+                        criterion.evidence_step_id == verify_step.step_id
+                        and type(criterion)
+                        in {
+                            ExpectedStateCriterion,
+                            HealthStatusCriterion,
+                            NumericBoundsCriterion,
+                        }
+                        for criterion in plan.verification_criteria
+                    )
+                    for verify_step in verify_steps
+                )
+                for reference in required_tools
+            )
+            if (
+                not metadata.side_effects.mutates_remote_state
+                and metadata.verification.required
+                and required_tools
+                and not covered_required_tools
+            ):
+                raise PolicyEvaluationError("Required verification Tools must be criterion-bound")
+            if metadata.side_effects.mutates_remote_state and (
+                not metadata.verification.required
+                or not required_tools
+                or not covered_required_tools
+                or not mutation_postconditions_cover
+            ):
+                raise PolicyEvaluationError(
+                    "Mutating Tools require declared independent verification evidence"
+                )
+
     def _evaluate_step(
         self,
         plan: ExecutionPlan,
@@ -225,9 +344,6 @@ class PolicyEngine:
             return PolicyReasonCode.TOOL_INTEGRITY_MISMATCH
         if not _target_is_in_scope(step, context.target, metadata):
             return PolicyReasonCode.TARGET_SCOPE_MISMATCH
-        if metadata.risk_level is RiskLevel.L3:
-            return PolicyReasonCode.L3_CONFIRMATION_UNAVAILABLE
-
         operator_rules = tuple(
             candidate
             for candidate in self._profile.rules
@@ -304,11 +420,16 @@ def _validate_plan(plan: ExecutionPlan) -> ExecutionPlan:
             or type(plan.plan_id) is not UUID
             or type(plan.task_id) is not UUID
             or type(plan.steps) is not tuple
+            or type(plan.verification_criteria) is not tuple
             or not plan.steps
             or any(
                 type(step) is not ExecutionStep
                 or type(step.arguments) is not GetSystemStatusArguments
                 for step in plan.steps
+            )
+            or any(
+                type(criterion) not in VERIFICATION_CRITERION_TYPES
+                for criterion in plan.verification_criteria
             )
         ):
             raise TypeError
@@ -320,10 +441,15 @@ def _validate_plan(plan: ExecutionPlan) -> ExecutionPlan:
             type(validated.plan_id) is not UUID
             or type(validated.task_id) is not UUID
             or type(validated.steps) is not tuple
+            or type(validated.verification_criteria) is not tuple
             or any(
                 type(step) is not ExecutionStep
                 or type(step.arguments) is not GetSystemStatusArguments
                 for step in validated.steps
+            )
+            or any(
+                type(criterion) not in VERIFICATION_CRITERION_TYPES
+                for criterion in validated.verification_criteria
             )
         ):
             raise TypeError

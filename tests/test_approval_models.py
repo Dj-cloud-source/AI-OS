@@ -25,6 +25,7 @@ from ai_server.models.tool import (
     ToolTargetScope,
     VerificationRequirement,
 )
+from ai_server.models.verification import EqualityCriterion
 from ai_server.tools.hashing import canonical_json_sha256
 
 
@@ -85,13 +86,22 @@ def fixed_snapshot() -> PlanApprovalSnapshot:
         recovery="Rollback is not required.",
     )
     return PlanApprovalSnapshot(
-        plan_schema_version="1",
+        plan_schema_version="2",
         task_id=UUID("11111111-1111-4111-8111-111111111111"),
         plan_id=UUID("22222222-2222-4222-8222-222222222222"),
         operator_id="local-user",
         target=step.target,
         execution_order=(step.step_id,),
         steps=(step,),
+        verification_criteria=(
+            EqualityCriterion(
+                criterion_id="mock-source",
+                evidence_step_id=step.step_id,
+                source="evidence",
+                field="source",
+                expected="mock",
+            ),
+        ),
     )
 
 
@@ -99,8 +109,34 @@ def test_plan_approval_snapshot_has_stable_golden_hash() -> None:
     snapshot = fixed_snapshot()
 
     assert canonical_json_sha256(snapshot) == (
-        "48f2c19e7dc8611bcca1681c5e515d285025cb60c1f4880adfd01a561193ade1"
+        "c0de7501860eba5395af7f7799733d18d39cb24bd619d2c09df3918714290e8f"
     )
+
+
+def test_snapshot_v2_hash_binds_complete_ordered_verification_criteria() -> None:
+    snapshot = fixed_snapshot()
+    first = snapshot.verification_criteria[0]
+    second = first.model_copy(
+        update={
+            "criterion_id": "mock-target",
+            "field": "target",
+            "expected": "local-mock",
+        }
+    )
+    changed = snapshot.model_copy(
+        update={"verification_criteria": (first.model_copy(update={"expected": "other"}),)}
+    )
+    ordered = snapshot.model_copy(update={"verification_criteria": (first, second)})
+    reordered = snapshot.model_copy(update={"verification_criteria": (second, first)})
+
+    assert canonical_json_sha256(changed) != canonical_json_sha256(snapshot)
+    assert canonical_json_sha256(ordered) != canonical_json_sha256(reordered)
+    for version_field in ("snapshot_schema_version", "plan_schema_version"):
+        with pytest.raises(ValidationError):
+            PlanApprovalSnapshot.model_validate(
+                snapshot.model_dump(mode="python") | {version_field: "1"},
+                strict=True,
+            )
 
 
 def test_snapshot_rejects_argument_order_or_hash_drift() -> None:

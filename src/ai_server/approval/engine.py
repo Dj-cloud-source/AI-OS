@@ -39,6 +39,7 @@ from ai_server.models.policy import (
     StepPolicyDecision,
 )
 from ai_server.models.tool import RiskLevel, TargetReference, ToolMetadata
+from ai_server.models.verification import VERIFICATION_CRITERION_TYPES
 from ai_server.tools.hashing import CanonicalizationError, canonical_json_sha256
 
 type Clock = Callable[[], datetime]
@@ -83,6 +84,9 @@ class _LedgerState:
     )
     expired_approvals: frozenset[UUID] = frozenset()
     consumed_approvals: Mapping[UUID, UUID] = field(default_factory=lambda: MappingProxyType({}))
+    consumed_plan_hashes: Mapping[str, tuple[UUID, UUID]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
     closed_attempts: frozenset[tuple[UUID, UUID]] = frozenset()
     expired_confirmations: frozenset[UUID] = frozenset()
     invalidated_confirmations: frozenset[UUID] = frozenset()
@@ -373,9 +377,15 @@ class ApprovalEngine:
             )
             consumed = dict(self._state.consumed_approvals)
             consumed[approval_id] = execution_attempt_id
+            consumed_plan_hashes = dict(self._state.consumed_plan_hashes)
+            consumed_plan_hashes[stored.record.plan_hash] = (
+                approval_id,
+                execution_attempt_id,
+            )
             self._state = replace(
                 self._state,
                 consumed_approvals=MappingProxyType(consumed),
+                consumed_plan_hashes=MappingProxyType(consumed_plan_hashes),
                 events=(*self._state.events, event),
             )
             return ApprovalValidationResult(
@@ -410,6 +420,24 @@ class ApprovalEngine:
                 execution_attempt_id=execution_attempt_id,
             )
         return validation
+
+    def record_for_attempt(
+        self,
+        approval_id: UUID,
+        execution_attempt_id: UUID,
+    ) -> ApprovalRecord:
+        """Return immutable non-secret evidence for one currently bound attempt."""
+        _require_uuid(approval_id, "Approval ID")
+        _require_uuid(execution_attempt_id, "Execution attempt ID")
+        with self._lock:
+            stored = self._state.approvals.get(approval_id)
+            if stored is None:
+                raise ApprovalStateError("Approval is unknown")
+            if self._state.consumed_approvals.get(approval_id) != execution_attempt_id:
+                raise ApprovalStateError("Approval is not bound to this execution attempt")
+            if (approval_id, execution_attempt_id) in self._state.closed_attempts:
+                raise ApprovalStateError("Execution attempt is already closed")
+            return stored.record
 
     def invalidate(
         self,
@@ -677,6 +705,42 @@ class ApprovalEngine:
                 execution_attempt_id=execution_attempt_id,
             )
 
+    def consumed_confirmation_for_attempt(
+        self,
+        confirmation_id: UUID,
+        execution_attempt_id: UUID,
+        invocation_id: UUID,
+    ) -> ManualConfirmationRecord:
+        """Return exact consumed L3 evidence bound to one Attempt invocation."""
+        if any(
+            type(identifier) is not UUID
+            for identifier in (
+                confirmation_id,
+                execution_attempt_id,
+                invocation_id,
+            )
+        ):
+            raise ApprovalStateError("Confirmation lookup identity is malformed")
+        with self._lock:
+            record = self._state.confirmations.get(confirmation_id)
+            if (
+                type(record) is not ManualConfirmationRecord
+                or confirmation_id not in self._state.consumed_confirmations
+                or self._state.confirmation_by_invocation.get(invocation_id) != confirmation_id
+                or record.execution_attempt_id != execution_attempt_id
+                or record.invocation_id != invocation_id
+            ):
+                raise ApprovalStateError(
+                    "Consumed confirmation evidence is unavailable or mismatched"
+                )
+            try:
+                return ManualConfirmationRecord.model_validate(
+                    record.model_dump(mode="python", warnings="error"),
+                    strict=True,
+                )
+            except BaseException:
+                raise ApprovalStateError("Consumed confirmation evidence is malformed") from None
+
     def _rebuild_review_inputs(
         self,
         plan: ExecutionPlan,
@@ -748,6 +812,14 @@ class ApprovalEngine:
             )
         bound_attempt = self._state.consumed_approvals.get(approval_id)
         if bound_attempt is None:
+            if record.plan_hash in self._state.consumed_plan_hashes:
+                return _invalid_result(
+                    reason=ApprovalValidationReason.APPROVAL_ALREADY_CONSUMED,
+                    checked_at=checked_at,
+                    approval_id=approval_id,
+                    plan_hash=record.plan_hash,
+                    execution_attempt_id=execution_attempt_id,
+                )
             return ApprovalValidationResult(
                 verdict=ApprovalValidationVerdict.VALID_UNCONSUMED,
                 reason=ApprovalValidationReason.VALID_UNCONSUMED,
@@ -1028,9 +1100,16 @@ def _validate_plan(plan: ExecutionPlan) -> ExecutionPlan:
             or type(plan.steps) is not tuple
             or not plan.steps
             or len(plan.steps) > 64
+            or type(plan.verification_criteria) is not tuple
+            or not plan.verification_criteria
+            or len(plan.verification_criteria) > 128
             or any(
                 type(step) is not ExecutionStep or not isinstance(step.arguments, BaseModel)
                 for step in plan.steps
+            )
+            or any(
+                type(criterion) not in VERIFICATION_CRITERION_TYPES
+                for criterion in plan.verification_criteria
             )
         ):
             raise TypeError
@@ -1156,6 +1235,7 @@ def _build_snapshot(
             target=decision.target,
             execution_order=tuple(step.step_id for step in snapshots),
             steps=tuple(snapshots),
+            verification_criteria=plan.verification_criteria,
         )
     except (ValidationError, ValueError):
         raise ApprovalReviewError("Approval could not create a canonical Plan snapshot") from None

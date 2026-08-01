@@ -6,6 +6,7 @@ from ai_server.models.context import RuntimeContext
 from ai_server.models.execution import ExecutionPlan, ExecutionStep, StepRole
 from ai_server.models.system_status import GetSystemStatusArguments
 from ai_server.models.tool import ToolMetadata
+from ai_server.models.verification import EqualityCriterion
 from ai_server.runtime.errors import InvalidTaskError, UnsupportedTaskError
 
 SUPPORTED_REQUEST = "get_system_status"
@@ -73,6 +74,29 @@ class Planner:
                 task_id=context.task_id,
                 target=context.target,
                 steps=(step,),
+                verification_criteria=(
+                    EqualityCriterion(
+                        criterion_id="mock-source",
+                        evidence_step_id=step.step_id,
+                        source="evidence",
+                        field="source",
+                        expected="mock",
+                    ),
+                    EqualityCriterion(
+                        criterion_id="mock-simulated",
+                        evidence_step_id=step.step_id,
+                        source="evidence",
+                        field="simulated",
+                        expected=True,
+                    ),
+                    EqualityCriterion(
+                        criterion_id="mock-target",
+                        evidence_step_id=step.step_id,
+                        source="evidence",
+                        field="target",
+                        expected=context.target,
+                    ),
+                ),
             )
         except Exception:
             raise UnsupportedTaskError("Planner could not create a valid execution plan") from None

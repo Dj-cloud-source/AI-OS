@@ -36,12 +36,6 @@ class ApprovalRequiredError(AiServerError):
     code: ClassVar[str] = "approval_required"
 
 
-class ApprovalResumeUnavailableError(InvalidStateTransitionError):
-    """Raised before Phase 5 can resume human-approved work at dispatch."""
-
-    code: ClassVar[str] = "approval_resume_unavailable"
-
-
 class InvalidClockError(AiServerError):
     """Raised when the lifecycle clock fails or returns an invalid timestamp."""
 
@@ -87,7 +81,6 @@ class VerificationError(AiServerError):
 __all__ = [
     "AiServerError",
     "ApprovalRequiredError",
-    "ApprovalResumeUnavailableError",
     "InvalidClockError",
     "InvalidRuntimeOutcomeError",
     "InvalidTaskError",

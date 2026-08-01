@@ -8,7 +8,6 @@ from ai_server.policy.errors import PolicyConfigurationError
 from ai_server.runtime.errors import (
     AiServerError,
     ApprovalRequiredError,
-    ApprovalResumeUnavailableError,
     InvalidClockError,
     InvalidRuntimeOutcomeError,
     InvalidStateTransitionError,
@@ -32,7 +31,6 @@ def test_domain_error_codes_are_stable_and_unique() -> None:
         ApprovalReviewError: "approval_review",
         ApprovalStateError: "approval_state",
         ApprovalRequiredError: "approval_required",
-        ApprovalResumeUnavailableError: "approval_resume_unavailable",
         InvalidClockError: "invalid_clock",
         InvalidRuntimeOutcomeError: "invalid_runtime_outcome",
         InvalidTaskError: "invalid_task",

@@ -82,7 +82,13 @@ FORBIDDEN_PACKAGE_IMPORTS = {
         "ai_server.policy",
     },
     "verifier": {
+        "ai_server.approval",
         "ai_server.executor",
+        "ai_server.memory",
+        "ai_server.planner",
+        "ai_server.policy",
+        "ai_server.runtime",
+        "ai_server.storage",
         "ai_server.tools.bootstrap",
         "ai_server.tools.gateway",
         "ai_server.tools.get_system_status",
@@ -109,11 +115,21 @@ POLICY_FORBIDDEN_REGISTRY_CALLS = {
     "freeze",
     "register",
 }
+VERIFIER_FORBIDDEN_CONTROL_CALLS = {
+    "dispatch",
+    "execute",
+    "invoke",
+    "recover",
+    "request_recovery",
+    "retry",
+    "rollback",
+}
 
 CONCRETE_CAPABILITY_MODULE = "ai_server.tools.get_system_status"
 CONCRETE_CAPABILITY_NAME = "GetSystemStatusTool"
 CONCRETE_CAPABILITY_OWNER = Path("tools/bootstrap.py")
 TOOL_GATEWAY_INVOKE_OWNER = Path("executor/service.py")
+TOOL_GATEWAY_IMPLEMENTATION = Path("tools/gateway.py")
 TASK_STATE_FIELDS = frozenset({"state", "state_history"})
 TASK_STATE_OWNER = Path("runtime/engine.py")
 
@@ -478,6 +494,22 @@ def test_policy_does_not_mutate_registry_or_resolve_tool_handlers() -> None:
     assert not violations
 
 
+def test_verifier_does_not_dispatch_or_initiate_recovery() -> None:
+    violations: list[tuple[Path, int, str]] = []
+    for path in (SRC_ROOT / "verifier").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        violations.extend(
+            (path.relative_to(SRC_ROOT), node.lineno, call_name)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            if (qualified := qualified_name(node.func)) is not None
+            if (call_name := qualified.rsplit(".", maxsplit=1)[-1])
+            in VERIFIER_FORBIDDEN_CONTROL_CALLS
+        )
+
+    assert not violations
+
+
 def test_bootstrap_is_only_production_importer_of_mock_tool() -> None:
     capability_importers = sorted(
         path.relative_to(SRC_ROOT)
@@ -504,10 +536,11 @@ def test_executor_is_only_production_tool_gateway_invoker() -> None:
     invokers = sorted(
         path.relative_to(SRC_ROOT)
         for path in SRC_ROOT.rglob("*.py")
+        if path.relative_to(SRC_ROOT) != TOOL_GATEWAY_IMPLEMENTATION
         if any(
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "invoke"
+            and node.func.attr in {"invoke", "_invoke_with_receipt"}
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
         )
     )

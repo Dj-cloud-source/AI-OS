@@ -30,9 +30,12 @@ from ai_server.tools.bootstrap import (
     build_default_registry,
 )
 from ai_server.tools.gateway import (
+    GatewayDispatchStatus,
     InvalidGatewayConfigurationError,
     InvalidToolCallError,
+    PostDispatchToolIntegrityError,
     ToolGateway,
+    ToolGatewayError,
     ToolIntegrityError,
     ToolResolutionError,
 )
@@ -205,6 +208,50 @@ def test_real_tool_success_binds_exact_identity_hashes_and_result_schema(
     assert result_matches_contract(result_document, artifacts.contract)
 
 
+def test_result_validation_is_read_only_and_rechecks_registered_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = install_recording_tool(monkeypatch)
+    registry = build_default_registry()
+    gateway = ToolGateway(registry, clock=sequence_clock(0, 1_000_000))
+    call = make_call(metadata_from(registry))
+    result = gateway.invoke(call)
+
+    assert len(calls) == 1
+    assert gateway.validate_result(call, result) is True
+    assert len(calls) == 1
+
+    document = result.model_dump(mode="python", warnings="error")
+    document["evidence"] = {"password": "bash -c GATEWAY_SECRET_MARKER"}
+    hostile = ToolResult[BaseModel].model_validate(document, strict=True)
+
+    assert gateway.validate_result(call, hostile) is False
+    assert len(calls) == 1
+
+
+def test_internal_receipt_preserves_invoke_result_and_records_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = install_recording_tool(monkeypatch)
+    registry = build_default_registry()
+    call = make_call(metadata_from(registry))
+    gateway = ToolGateway(
+        registry,
+        clock=sequence_clock(1_000_000, 2_000_000),
+    )
+
+    receipt = gateway._invoke_with_receipt(call)
+
+    assert calls == [GetSystemStatusArguments()]
+    assert receipt.result.success is True
+    assert receipt.dispatch_status is GatewayDispatchStatus.HANDLER_DISPATCHED
+    assert receipt.mutates_remote_state is False
+    assert receipt.result.model_dump(mode="json", warnings="error") == ToolGateway(
+        registry,
+        clock=sequence_clock(1_000_000, 2_000_000),
+    ).invoke(call).model_dump(mode="json", warnings="error")
+
+
 @pytest.mark.parametrize(
     ("changed_field", "changed_value"),
     [
@@ -270,6 +317,21 @@ def test_gateway_returns_structured_arguments_hash_failure_without_dispatch(
         result.model_dump(mode="json", warnings="error"),
     )
     assert result_matches_contract(result_document, artifacts.contract)
+
+
+def test_internal_receipt_marks_structured_pre_handler_failure_not_dispatched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = install_recording_tool(monkeypatch)
+    registry = build_default_registry()
+    call = make_call(metadata_from(registry)).model_copy(update={"arguments_hash": "e" * 64})
+
+    receipt = ToolGateway(registry)._invoke_with_receipt(call)
+
+    assert calls == []
+    assert receipt.result.success is False
+    assert receipt.dispatch_status is GatewayDispatchStatus.NOT_DISPATCHED
+    assert receipt.mutates_remote_state is False
 
 
 def test_real_registered_input_schema_is_strict_and_target_bounded() -> None:
@@ -360,6 +422,27 @@ def test_gateway_rejects_wrong_argument_model_without_coercion_or_dispatch(
     )
 
 
+def test_gateway_rejects_tool_call_subclass_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = install_recording_tool(monkeypatch)
+    registry = build_default_registry()
+    canonical_call = make_call(metadata_from(registry))
+
+    class SubclassCall(ToolCall[GetSystemStatusArguments]):
+        pass
+
+    subclass_call = SubclassCall.model_validate(
+        canonical_call.model_dump(mode="python", warnings="error"),
+        strict=True,
+    )
+
+    with pytest.raises(InvalidToolCallError, match="malformed ToolCall"):
+        ToolGateway(registry).invoke(subclass_call)
+
+    assert calls == []
+
+
 @pytest.mark.parametrize(
     "target",
     [
@@ -410,12 +493,14 @@ def test_gateway_returns_sanitized_structured_handler_failure(
     registry = build_default_registry()
     call = make_call(metadata_from(registry))
 
-    result = ToolGateway(
+    receipt = ToolGateway(
         registry,
         clock=sequence_clock(0, 1),
-    ).invoke(call)
+    )._invoke_with_receipt(call)
+    result = receipt.result
 
     assert calls == [GetSystemStatusArguments()]
+    assert receipt.dispatch_status is GatewayDispatchStatus.HANDLER_DISPATCHED
     assert_failure(
         result,
         code="tool_execution_failed",
@@ -435,12 +520,14 @@ def test_gateway_rejects_malformed_payload_after_one_dispatch(
     calls = install_recording_tool(monkeypatch, behavior=malformed_handler)
     registry = build_default_registry()
 
-    result = ToolGateway(
+    receipt = ToolGateway(
         registry,
         clock=sequence_clock(0, 1),
-    ).invoke(make_call(metadata_from(registry)))
+    )._invoke_with_receipt(make_call(metadata_from(registry)))
+    result = receipt.result
 
     assert calls == [GetSystemStatusArguments()]
+    assert receipt.dispatch_status is GatewayDispatchStatus.HANDLER_DISPATCHED
     assert_failure(
         result,
         code="malformed_tool_output",
@@ -465,12 +552,14 @@ def test_gateway_enforces_registered_result_schema_after_one_dispatch(
         reject_success_only,
     )
 
-    result = ToolGateway(
+    receipt = ToolGateway(
         registry,
         clock=sequence_clock(0, 1),
-    ).invoke(make_call(metadata_from(registry)))
+    )._invoke_with_receipt(make_call(metadata_from(registry)))
+    result = receipt.result
 
     assert calls == [GetSystemStatusArguments()]
+    assert receipt.dispatch_status is GatewayDispatchStatus.HANDLER_DISPATCHED
     assert_failure(
         result,
         code="malformed_tool_output",
@@ -486,13 +575,15 @@ def test_gateway_raises_integrity_error_when_failure_envelope_is_invalid(
     registry = build_default_registry()
     monkeypatch.setattr(gateway_module, "result_matches_contract", lambda *args: False)
 
-    with pytest.raises(ToolIntegrityError, match="structured failure"):
+    with pytest.raises(PostDispatchToolIntegrityError, match="structured failure") as caught:
         ToolGateway(
             registry,
             clock=sequence_clock(0, 1),
         ).invoke(make_call(metadata_from(registry)))
 
     assert calls == [GetSystemStatusArguments()]
+    assert caught.value.dispatch_status is GatewayDispatchStatus.HANDLER_DISPATCHED
+    assert caught.value.mutates_remote_state is False
 
 
 @pytest.mark.parametrize(
@@ -526,12 +617,14 @@ def test_gateway_fails_closed_on_redaction_or_executable_marker(
     calls = install_recording_tool(monkeypatch, behavior=unsafe_handler)
     registry = build_default_registry()
 
-    result = ToolGateway(
+    receipt = ToolGateway(
         registry,
         clock=sequence_clock(0, 1),
-    ).invoke(make_call(metadata_from(registry)))
+    )._invoke_with_receipt(make_call(metadata_from(registry)))
+    result = receipt.result
 
     assert calls == [GetSystemStatusArguments()]
+    assert receipt.dispatch_status is GatewayDispatchStatus.HANDLER_DISPATCHED
     assert_failure(
         result,
         code="result_redaction_failed",
@@ -554,12 +647,14 @@ def test_gateway_fails_closed_on_retained_payload_size_violation(
     calls = install_recording_tool(monkeypatch, behavior=oversized_handler)
     registry = build_default_registry()
 
-    result = ToolGateway(
+    receipt = ToolGateway(
         registry,
         clock=sequence_clock(0, 1),
-    ).invoke(make_call(metadata_from(registry)))
+    )._invoke_with_receipt(make_call(metadata_from(registry)))
+    result = receipt.result
 
     assert calls == [GetSystemStatusArguments()]
+    assert receipt.dispatch_status is GatewayDispatchStatus.HANDLER_DISPATCHED
     assert_failure(
         result,
         code="result_redaction_failed",
@@ -574,12 +669,14 @@ def test_gateway_checks_timeout_after_exactly_one_dispatch(
     registry = build_default_registry()
     metadata = metadata_from(registry)
 
-    result = ToolGateway(
+    receipt = ToolGateway(
         registry,
         clock=sequence_clock(0, metadata.timeout_ms * 1_000_000 + 1),
-    ).invoke(make_call(metadata))
+    )._invoke_with_receipt(make_call(metadata))
+    result = receipt.result
 
     assert calls == [GetSystemStatusArguments()]
+    assert receipt.dispatch_status is GatewayDispatchStatus.HANDLER_DISPATCHED
     assert_failure(
         result,
         code="tool_timeout",
@@ -610,6 +707,27 @@ def test_gateway_fails_closed_when_initial_clock_read_raises_without_dispatch(
     )
 
 
+def test_internal_receipt_marks_initial_clock_failure_not_dispatched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = install_recording_tool(monkeypatch)
+    registry = build_default_registry()
+
+    def failing_clock() -> int:
+        raise RuntimeError("SENSITIVE_CLOCK_MARKER")
+
+    receipt = ToolGateway(
+        registry,
+        clock=failing_clock,
+    )._invoke_with_receipt(make_call(metadata_from(registry)))
+
+    assert calls == []
+    assert receipt.result.error is not None
+    assert receipt.result.error.code == "gateway_clock_failed"
+    assert receipt.dispatch_status is GatewayDispatchStatus.NOT_DISPATCHED
+    assert receipt.mutates_remote_state is False
+
+
 def test_gateway_fails_closed_when_final_clock_read_raises_after_one_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -634,6 +752,31 @@ def test_gateway_fails_closed_when_final_clock_read_raises_after_one_dispatch(
         code="gateway_clock_failed",
         category=ToolErrorCategory.INTERNAL,
     )
+
+
+def test_internal_receipt_marks_final_clock_failure_handler_dispatched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = install_recording_tool(monkeypatch)
+    registry = build_default_registry()
+    clock_reads = iter((0,))
+
+    def failing_final_clock() -> int:
+        try:
+            return next(clock_reads)
+        except StopIteration:
+            raise RuntimeError("SENSITIVE_CLOCK_MARKER") from None
+
+    receipt = ToolGateway(
+        registry,
+        clock=failing_final_clock,
+    )._invoke_with_receipt(make_call(metadata_from(registry)))
+
+    assert calls == [GetSystemStatusArguments()]
+    assert receipt.result.error is not None
+    assert receipt.result.error.code == "gateway_clock_failed"
+    assert receipt.dispatch_status is GatewayDispatchStatus.HANDLER_DISPATCHED
+    assert receipt.mutates_remote_state is False
 
 
 def test_gateway_fails_closed_when_clock_moves_backward_after_one_dispatch(
@@ -693,3 +836,10 @@ def test_gateway_rejects_untrusted_call_without_leaking_boundary_errors(
 
     assert marker not in str(caught.value)
     assert caught.value.__cause__ is None
+
+
+def test_gateway_exceptions_default_to_not_dispatched_without_side_effect_claim() -> None:
+    error = ToolGatewayError("safe")
+
+    assert error.dispatch_status is GatewayDispatchStatus.NOT_DISPATCHED
+    assert error.mutates_remote_state is None

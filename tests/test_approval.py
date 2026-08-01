@@ -210,6 +210,38 @@ def test_l2_review_commit_consume_and_revalidate_without_dispatch() -> None:
     assert all(event.invocation_id is None for event in engine.events)
 
 
+def test_sibling_approvals_for_same_exact_plan_cannot_authorize_two_attempts() -> None:
+    _, catalog, plan, decision = build_plan_and_decision(risk=RiskLevel.L2)
+    engine = make_engine(catalog, MutableClock())
+    first = issue_approval(engine, plan, decision)
+    second = issue_approval(engine, plan, decision)
+    first_attempt = uuid4()
+    second_attempt = uuid4()
+
+    consumed = engine.consume_for_attempt(
+        first.approval_id,
+        plan,
+        decision,
+        first_attempt,
+    )
+    sibling = engine.consume_for_attempt(
+        second.approval_id,
+        plan,
+        decision,
+        second_attempt,
+    )
+
+    assert consumed.verdict is ApprovalValidationVerdict.VALID_FOR_BOUND_ATTEMPT
+    assert sibling.verdict is ApprovalValidationVerdict.INVALID
+    assert sibling.reason is ApprovalValidationReason.APPROVAL_ALREADY_CONSUMED
+    assert (
+        tuple(event.kind for event in engine.events).count(
+            ApprovalAuditEventKind.PLAN_APPROVAL_CONSUMED
+        )
+        == 1
+    )
+
+
 def test_approval_record_and_review_are_strict_frozen_and_hash_bound() -> None:
     _, catalog, plan, decision = build_plan_and_decision()
     engine = make_engine(catalog, MutableClock())
@@ -277,6 +309,36 @@ def test_consume_binds_one_attempt_and_replay_or_other_attempt_fails() -> None:
     assert closed.reason is ApprovalValidationReason.EXECUTION_ATTEMPT_CLOSED
 
 
+def test_record_for_attempt_requires_exact_open_attempt_binding() -> None:
+    """Approval evidence is readable only for its one live consumed attempt."""
+    _, catalog, plan, decision = build_plan_and_decision(risk=RiskLevel.L2)
+    engine = make_engine(catalog, MutableClock())
+    record = issue_approval(engine, plan, decision)
+    bound_attempt = uuid4()
+    other_attempt = uuid4()
+
+    with pytest.raises(ApprovalStateError, match="not bound"):
+        engine.record_for_attempt(record.approval_id, bound_attempt)
+    with pytest.raises(ApprovalStateError, match="unknown"):
+        engine.record_for_attempt(uuid4(), bound_attempt)
+
+    consumed = engine.consume_for_attempt(
+        record.approval_id,
+        plan,
+        decision,
+        bound_attempt,
+    )
+    assert consumed.verdict is ApprovalValidationVerdict.VALID_FOR_BOUND_ATTEMPT
+    assert engine.record_for_attempt(record.approval_id, bound_attempt) == record
+
+    with pytest.raises(ApprovalStateError, match="not bound"):
+        engine.record_for_attempt(record.approval_id, other_attempt)
+
+    engine.close_attempt(record.approval_id, bound_attempt)
+    with pytest.raises(ApprovalStateError, match="already closed"):
+        engine.record_for_attempt(record.approval_id, bound_attempt)
+
+
 def test_forged_or_cross_engine_approval_id_is_never_authoritative() -> None:
     _, catalog, plan, decision = build_plan_and_decision()
     clock = MutableClock()
@@ -307,6 +369,7 @@ def test_forged_or_cross_engine_approval_id_is_never_authoritative() -> None:
         "reason",
         "impact",
         "verification",
+        "verification_criteria",
         "recovery",
         "policy_hash",
     ],
@@ -362,6 +425,9 @@ def test_any_plan_or_policy_drift_invalidates_approval(mutation: str) -> None:
     elif mutation == "verification":
         step = plan.steps[0].model_copy(update={"verification": "Changed criterion."})
         changed_plan = plan.model_copy(update={"steps": (step,)})
+    elif mutation == "verification_criteria":
+        criterion = plan.verification_criteria[0].model_copy(update={"expected": "other"})
+        changed_plan = plan.model_copy(update={"verification_criteria": (criterion,)})
     elif mutation == "recovery":
         step = plan.steps[0].model_copy(update={"recovery": "Changed recovery."})
         changed_plan = plan.model_copy(update={"steps": (step,)})

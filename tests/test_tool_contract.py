@@ -331,6 +331,61 @@ def test_contract_rejects_approval_and_retry_mismatches() -> None:
     assert l2_contract.risk_level is RiskLevel.L2
 
 
+@pytest.mark.parametrize(
+    ("risk_level", "mutates_remote_state", "accepted"),
+    [
+        (RiskLevel.L0, False, True),
+        (RiskLevel.L0, True, False),
+        (RiskLevel.L1, False, True),
+        (RiskLevel.L1, True, False),
+        (RiskLevel.L2, False, True),
+        (RiskLevel.L2, True, True),
+        (RiskLevel.L3, False, True),
+        (RiskLevel.L3, True, True),
+    ],
+)
+def test_contract_binds_remote_mutation_to_elevated_risk(
+    risk_level: RiskLevel,
+    mutates_remote_state: bool,
+    accepted: bool,
+) -> None:
+    implication = {
+        RiskLevel.L0: ApprovalImplication.AUTOMATIC_EXECUTION,
+        RiskLevel.L1: ApprovalImplication.POLICY_CONTROLLED_EXECUTION,
+        RiskLevel.L2: ApprovalImplication.EXPLICIT_HUMAN_APPROVAL,
+        RiskLevel.L3: (ApprovalImplication.EXPLICIT_HUMAN_APPROVAL_AND_MANUAL_CONFIRMATION),
+    }[risk_level]
+    bindings = (
+        ()
+        if risk_level in {RiskLevel.L0, RiskLevel.L1}
+        else (
+            ApprovalBinding.PLAN_HASH,
+            ApprovalBinding.ARGUMENTS,
+            ApprovalBinding.EXPIRATION,
+        )
+    )
+    document = make_contract(
+        risk_level=risk_level,
+        implication=implication,
+        bindings=bindings,
+    ).model_dump(mode="python")
+    document["side_effects"] = ToolSideEffects(
+        mutates_remote_state=mutates_remote_state,
+        kind=(
+            SideEffectKind.SERVICE_STATE_CHANGE
+            if mutates_remote_state
+            else SideEffectKind.READ_ONLY
+        ),
+    )
+
+    if accepted:
+        contract = ToolContract.model_validate(document, strict=True)
+        assert contract.side_effects.mutates_remote_state is mutates_remote_state
+    else:
+        with pytest.raises(ValidationError, match="cannot mutate remote state"):
+            ToolContract.model_validate(document, strict=True)
+
+
 def test_contract_rejects_non_strict_schemas_and_duplicate_ids() -> None:
     valid = make_contract()
     invalid_schema = valid.model_dump(mode="python")

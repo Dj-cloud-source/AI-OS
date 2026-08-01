@@ -240,9 +240,12 @@ Responsible for:
 
 - checking expected result
 - reporting success/failure
-- requesting rollback
+- reporting that human recovery consideration is required when verification
+  cannot safely close an effect
 
 Verifier consumes Runtime-provided structured results. It never invokes Tool.
+Verifier cannot request, initiate, authorize, or execute rollback or other
+recovery. Recovery is always a separate governed Task and Plan.
 
 ---
 

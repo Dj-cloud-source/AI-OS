@@ -1,7 +1,9 @@
 """Strict immutable models for the versioned Tool Protocol."""
 
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Annotated, Literal, Self, cast
 from uuid import UUID
 
@@ -11,6 +13,7 @@ from pydantic import (
     Field,
     JsonValue,
     SerializeAsAny,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -62,6 +65,37 @@ _TOOL_RESULT_ENVELOPE_FIELDS = frozenset(
         "duration_ms",
     }
 )
+
+
+def _freeze_json(value: JsonValue) -> JsonValue:
+    """Recursively replace mutable JSON containers with immutable equivalents."""
+    if type(value) is dict:
+        return cast(
+            JsonValue,
+            MappingProxyType({key: _freeze_json(nested) for key, nested in value.items()}),
+        )
+    if type(value) is list:
+        return cast(
+            JsonValue,
+            tuple(_freeze_json(nested) for nested in value),
+        )
+    return value
+
+
+def _thaw_json(value: object) -> JsonValue:
+    """Return fresh built-in JSON containers for hashing and serialization."""
+    if isinstance(value, Mapping):
+        thawed: dict[str, JsonValue] = {}
+        for key, nested in cast(Mapping[object, object], value).items():
+            if type(key) is not str:
+                raise ValueError("JSON object keys must be exact strings")
+            thawed[key] = _thaw_json(nested)
+        return thawed
+    if isinstance(value, tuple):
+        return [_thaw_json(nested) for nested in value]
+    if value is None or type(value) in {bool, int, float, str}:
+        return cast(JsonValue, value)
+    raise ValueError("Tool evidence contains an unsupported value")
 
 
 class RiskLevel(StrEnum):
@@ -331,6 +365,11 @@ class ToolContract(BaseModel):
             raise ValueError("Approval implication does not match authoritative risk level")
         if actual_bindings != expected_bindings:
             raise ValueError("Approval bindings do not match authoritative risk level")
+        if (
+            self.risk_level in {RiskLevel.L0, RiskLevel.L1}
+            and self.side_effects.mutates_remote_state
+        ):
+            raise ValueError("L0 and L1 Tools cannot mutate remote state")
         if self.automatic_retry and not self.idempotent:
             raise ValueError("Automatic retry requires an idempotent Tool")
 
@@ -493,9 +532,26 @@ class ToolResult[PayloadT: BaseModel](BaseModel):
     target: TargetReference
     success: bool
     data: SerializeAsAny[PayloadT] | None
-    evidence: dict[str, JsonValue] = Field(default_factory=dict, max_length=128)
+    evidence: Mapping[str, JsonValue] = Field(default_factory=dict, max_length=128)
     error: ToolError | None
     duration_ms: int = Field(ge=0)
+
+    @field_validator("evidence", mode="after")
+    @classmethod
+    def freeze_evidence(
+        cls,
+        value: Mapping[str, JsonValue],
+    ) -> Mapping[str, JsonValue]:
+        """Deep-freeze retained evidence before exposing the ToolResult."""
+        return cast(Mapping[str, JsonValue], _freeze_json(dict(value)))
+
+    @field_serializer("evidence")
+    def serialize_evidence(self, value: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        """Serialize immutable evidence as fresh built-in JSON containers."""
+        thawed = _thaw_json(value)
+        if type(thawed) is not dict:
+            raise ValueError("Tool evidence must serialize as an object")
+        return thawed
 
     @model_validator(mode="after")
     def validate_success_error_exclusivity(self) -> Self:

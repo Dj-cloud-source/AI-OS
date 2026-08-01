@@ -10,6 +10,7 @@ from rich.text import Text
 
 from ai_server import __version__
 from ai_server.models.approval import ApprovalRecord, ApprovalReview
+from ai_server.models.executor import ManualConfirmationChallenge
 from ai_server.models.runtime import RuntimeOutcome, RuntimeOutcomeStatus
 from ai_server.models.task import Task
 from ai_server.planner.service import SUPPORTED_REQUEST
@@ -56,10 +57,65 @@ def _render_outcome(outcome: RuntimeOutcome) -> None:
     if outcome.failure is not None:
         table.add_row("failure_code", outcome.failure.code)
         table.add_row("failure", outcome.failure.message)
+    if outcome.execution_authorization is not None:
+        table.add_row(
+            "execution_attempt_id",
+            str(outcome.execution_authorization.execution_attempt_id),
+        )
+    if outcome.execution_report is not None:
+        table.add_row("execution_report", outcome.execution_report.status.value)
+        if outcome.execution_uncertainty is None:
+            table.add_row(
+                "execution_report_human_intervention_required",
+                str(outcome.execution_report.human_intervention_required),
+            )
+    if outcome.execution_uncertainty is not None:
+        uncertainty = outcome.execution_uncertainty
+        table.add_row("execution_uncertainty", uncertainty.uncertainty_kind)
+        table.add_row("uncertainty_hash", uncertainty.content_hash)
+        table.add_row("dispatch_status", uncertainty.dispatch_status.value)
+        table.add_row("effect_disposition", uncertainty.effect_disposition.value)
+        table.add_row(
+            "human_intervention_required",
+            str(uncertainty.human_intervention_required),
+        )
+    if outcome.verification_result is not None:
+        verification = outcome.verification_result
+        table.add_row("verification_status", verification.status.value)
+        table.add_row("verification_hash", verification.content_hash)
+        table.add_row(
+            "verification_failure_reasons",
+            ",".join(reason.value for reason in verification.failure_reasons) or "none",
+        )
+    table.add_row("final_effect_disposition", outcome.final_effect_disposition.value)
+    table.add_row(
+        "human_intervention_required",
+        str(outcome.human_intervention_required),
+    )
     if outcome.results:
         table.add_row("tool_results", str(len(outcome.results)))
         table.add_row("all_successful", str(all(result.success for result in outcome.results)))
     console.print(table)
+    if outcome.execution_report is not None:
+        records = Table(title="Governed Tool Invocations")
+        records.add_column("Step")
+        records.add_column("Role")
+        records.add_column("Tool")
+        records.add_column("Dispatch")
+        records.add_column("Effect")
+        records.add_column("Result")
+        for record in outcome.execution_report.records:
+            records.add_row(
+                f"{record.step_index}: {record.step_id}",
+                record.role.value,
+                f"{record.tool_id}@{record.tool_version}",
+                record.dispatch_status.value,
+                record.effect_disposition.value,
+                "success"
+                if record.result is not None and record.result.success
+                else (record.failure_code or "unavailable"),
+            )
+        console.print(records)
 
 
 def _render_review(review: ApprovalReview) -> None:
@@ -120,7 +176,22 @@ def _render_review(review: ApprovalReview) -> None:
             "limitations",
             Text(json.dumps(step.limitations, ensure_ascii=False)),
         )
-        console.print(table)
+    console.print(table)
+    criteria = Table(title="Mandatory Verification Criteria")
+    criteria.add_column("Criterion", no_wrap=True)
+    criteria.add_column("Exact Definition", overflow="fold")
+    for criterion in review.snapshot.verification_criteria:
+        criteria.add_row(
+            criterion.criterion_id,
+            Text(
+                json.dumps(
+                    criterion.model_dump(mode="json", warnings="error"),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            ),
+        )
+    console.print(criteria)
 
 
 def _render_approval(record: ApprovalRecord) -> None:
@@ -132,6 +203,45 @@ def _render_approval(record: ApprovalRecord) -> None:
     table.add_row("plan_hash", record.plan_hash)
     table.add_row("expires_at", record.expires_at.isoformat())
     console.print(table)
+
+
+def _render_l3_challenge(challenge: ManualConfirmationChallenge) -> None:
+    """Display every non-secret fact bound by an L3 Challenge Hash."""
+    table = Table(title="Immediate L3 Invocation Confirmation")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("challenge_hash", challenge.challenge_hash)
+    table.add_row("authorization_hash", challenge.authorization_hash)
+    table.add_row("approval_id", str(challenge.approval_id))
+    table.add_row("approval_plan_hash", challenge.approval_plan_hash)
+    table.add_row("approval_record_hash", challenge.approval_record_hash)
+    table.add_row("approval_expires_at", challenge.approval_expires_at.isoformat())
+    table.add_row("execution_attempt_id", str(challenge.execution_attempt_id))
+    table.add_row("invocation_id", str(challenge.invocation_id))
+    table.add_row("step", f"{challenge.step_index}: {challenge.step_id}")
+    table.add_row("role", challenge.role.value)
+    table.add_row("tool", f"{challenge.tool_id}@{challenge.tool_version}")
+    table.add_row("contract_hash", challenge.contract_hash)
+    table.add_row("implementation_hash", challenge.implementation_hash)
+    table.add_row("arguments_hash", challenge.arguments_hash)
+    table.add_row("target", challenge.target.model_dump_json())
+    console.print(table)
+
+
+def _prompt_l3_confirmation(challenge: ManualConfirmationChallenge) -> str:
+    """Read one exact L3 confirmation only from the interactive local TTY."""
+    if not _is_interactive_review():
+        return ""
+    _render_l3_challenge(challenge)
+    try:
+        response = typer.prompt(
+            f"Type CONFIRM {challenge.challenge_hash}",
+            default="",
+            show_default=False,
+        )
+        return response if type(response) is str else ""
+    except (EOFError, KeyboardInterrupt, typer.Abort):
+        return ""
 
 
 @app.command()
@@ -207,10 +317,22 @@ def run_task(
             typer.echo("Approval Commit failed safely.", err=True)
             raise typer.Exit(code=2) from None
         _render_approval(record)
-        typer.echo(
-            "Authorization recorded in this process; execution remains paused until Phase 5."
-        )
-        return
+        try:
+            resumed = runtime.resume_approved(
+                outcome,
+                record.approval_id,
+                confirmation_reader=_prompt_l3_confirmation,
+            )
+        except BaseException:
+            typer.echo("Approved execution could not resume safely.", err=True)
+            raise typer.Exit(code=2) from None
+        _render_outcome(resumed)
+        if resumed.status is RuntimeOutcomeStatus.COMPLETED:
+            return
+        if resumed.status is RuntimeOutcomeStatus.FAILED:
+            raise typer.Exit(code=1)
+        typer.echo("Approved execution remains paused; no Tool was dispatched.", err=True)
+        raise typer.Exit(code=2)
     if response == "REJECT":
         try:
             runtime.reject_approval(outcome, review.review_id)

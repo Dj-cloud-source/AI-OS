@@ -1,6 +1,6 @@
 # AIOps Agent Runtime Roadmap
 
-Status: Phases 0–4 implemented; Phases 5–11 planned
+Status: Phases 0–6 implemented; Phases 7–11 planned
 
 This roadmap defines the implementation order for the local-first AIOps Agent
 Runtime. It is subordinate to `docs/VISION.md`, `docs/PHILOSOPHY.md`,
@@ -15,10 +15,11 @@ capability is enabled by the current implementation.
 
 Approval Gate conformance means that every Policy-allowed Plan passes through
 `WAITING_FOR_APPROVAL`, `NOT_REQUIRED` is recorded, human-approval-required
-work pauses without dispatch, and direct bypass is rejected. Phase 4 adds only
+work pauses without dispatch, and direct bypass is rejected. Phase 4 added only
 in-process approval issuance, validation, consumption protocols, and L3
-confirmation contracts. Persistent authorization, cross-process resumption,
-and dispatch of a human-approved Plan remain unavailable.
+confirmation contracts. Phase 5 connects those process-local authorizations to
+governed Executor dispatch. Persistent authorization and cross-process
+resumption remain unavailable until Phase 9.
 
 ## Fixed architecture decisions
 
@@ -40,9 +41,32 @@ and dispatch of a human-approved Plan remain unavailable.
 - The authoritative execution flow is
   `Runtime → Policy → Approval Decision → Executor → Tool Gateway → Tool
   → Runtime → Verifier`.
-- Verification reads are declared as typed steps in the approved plan. Their
-  Tool versions, arguments, order, and expected conditions are included in the
-  plan hash; Executor obtains the evidence and Verifier only evaluates it.
+- Contract-required extra verification reads are declared as typed steps in
+  the approved plan. Their Tool versions, arguments, order, and expected
+  conditions are included in the plan hash; Executor obtains the evidence and
+  Verifier only evaluates it.
+- Runtime component injection is a trusted in-process composition/test seam,
+  not a model-, Skill-, config-, or plugin-selected authority boundary. The
+  supported CLI constructs the built-in Executor/Gateway and Verifier.
+- Ordinary SHA-256 content hashes provide deterministic binding, not
+  authentication. RuntimeOutcome is not an authorization or cross-process
+  resume token; Phase 9 must reconstruct authority from owner journals and
+  revalidate persisted verification semantics before recovery.
+- Phase 6 uses ExecutionPlan v2 and Approval Snapshot v2. Every Plan has at
+  least one ordered, structured, mandatory Plan-level verification criterion;
+  its complete content and order are Hash-bound. v1 authorization cannot be
+  reused for v2.
+- An extra `VERIFY` Step exists only when the executed Tool Contract requires
+  that exact read-only, non-L3 Tool. Every required verification reference is
+  criterion-bound; partial coverage is invalid. A Contract-permitted read-only
+  self-evidence result is not called twice; current
+  `get_system_status@1.0.0` uses this path. Phase 6 permits at most one mutating
+  source Step per Plan, and every required reference for it needs a meaningful
+  postcondition rather than only provenance equality.
+- An ordered Plan has an `OBSERVE`/`ACTION` prefix followed by a `VERIFY`
+  suffix. Runtime asks Executor to dispatch the prefix in `EXECUTING` and the
+  suffix in `VERIFYING`; Verifier still receives evidence only. An L3 Tool is
+  valid only as an `ACTION` Step.
 - Phase 0–7 Context uses Task data, static local configuration, and supplied
   evidence only. Before Phase 8 remote context is enabled, Runtime adds
   versioned Context Profiles and deterministic ObservationRequests. Each
@@ -60,13 +84,22 @@ and dispatch of a human-approved Plan remain unavailable.
   not permitted.
 - L1 is fail-closed: an exact missing rule is `DENY`; an exact matching rule
   may resolve to `NOT_REQUIRED` or `HUMAN_PLAN_APPROVAL`.
-- Until Phase 5 atomically connects single-use per-invocation confirmation to
-  the exact Tool dispatch boundary, every resolved L3 Step is denied. Phase 4
-  implements and tests the isolated confirmation protocol but does not relax
-  this production gate. An L3 Step whose identity, integrity, and target-scope
-  checks pass uses `l3_confirmation_unavailable`; an earlier identity,
-  integrity, or scope failure retains its more specific stable denial reason.
-  Neither a model nor policy configuration can relax this gate.
+- Phase 4 denied every resolved L3 Step while its confirmation protocol was
+  isolated. Phase 5 connects a single-use confirmation to the exact invocation
+  boundary. The confirmation Challenge Hash covers the complete strict model
+  except its self-referential Hash, including Authorization, Approval, Plan,
+  Approval Record/Expiration, Step, exact Tool identity and integrity Hashes,
+  Arguments, Target, execution attempt, and invocation; it is not a Runtime
+  state. Removing the temporary blanket denial does not register
+  or authorize a Tool: the default Registry remains L0-only, and an L3 Tool
+  still needs reviewed artifacts, an exact Policy allow decision, Plan
+  Approval, and per-invocation confirmation.
+- Plan Approval consumption is linearized when Executor opens the exact
+  attempt; only then may Runtime enter `EXECUTING`. The Approval is burned even
+  if execution stops before dispatch. For each L3 invocation, Confirmation
+  consumption is additionally adjacent to dispatch of the already-bound
+  ToolCall in the same Executor call stack. Neither boundary claims a
+  transaction with a remote side effect.
 
 ## Cross-phase failure rules
 
@@ -79,6 +112,15 @@ and dispatch of a human-approved Plan remain unavailable.
 - Once a mutating Tool has been dispatched, timeout, unknown outcome, or failed
   verification ends in `FAILED`; the structured outcome marks the effect
   unknown and human intervention required.
+- ExecutionReport records per-Step dispatch certainty and effect certainty.
+  A failure known to precede handler entry records no dispatch and no effect;
+  a post-dispatch result cannot claim a confirmed mutating effect before
+  independent Verification.
+- If no trustworthy final ExecutionReport exists and attempt closure cannot be
+  confirmed, Runtime records hash-bound `ExecutionUncertainty` and enters
+  `FAILED`. Before a dispatch-capable call it may prove `NOT_DISPATCHED/NONE`;
+  afterward it must use `UNKNOWN/UNKNOWN` and require human intervention. It
+  never fabricates Step, Invocation, or ToolResult facts.
 - `PARTIAL_SUCCESS`, `ROLLBACK`, and `MANUAL_INTERVENTION_REQUIRED` are reserved
   and unreachable through Phase 11. Making one reachable requires a prior
   governance revision.
@@ -384,8 +426,9 @@ Approval binds the ordered steps, Tool names and versions, exact arguments,
 target, verification criteria, approver, and expiration. Any execution-relevant
 change invalidates approval. Expired, consumed, rejected, or mismatched approval
 is rejected. Phase 4 Review/Commit occurs in one CLI process and leaves the Task
-in `WAITING_FOR_APPROVAL`; Phase 5 connects atomic validation and consumption
-to Executor dispatch. Cross-process resume is deferred until Phase 9.
+in `WAITING_FOR_APPROVAL`; Phase 5 connects process-local linearized validation
+and consumption to Executor dispatch. Cross-process resume is deferred until
+Phase 9.
 Consumption binds approval to one execution attempt and cannot authorize a
 retry or second attempt. The default Registry remains L0-only and no synthetic
 L2 capability is registered for demonstration.
@@ -405,36 +448,121 @@ and any registered L2/L3 capability.
 
 ## Phase 5 — Executor
 
+Status: Implemented (2026-08-01)
+
 ### Goal
 
 Make Executor the only component capable of invoking an approved Tool.
 
 ### Inputs
 
-An ExecutionPlan, PolicyDecision, required ApprovalRecord, and Tool Gateway.
+An ExecutionPlan, its PolicyDecision, an Approval ID referencing an Approval
+Engine-owned process-local ApprovalRecord when Policy requires one,
+authoritative frozen Tool Metadata, the deterministic Tool Gateway, and an
+injectable monotonic timer. A caller-supplied record is never authority.
 
 ### Outputs
 
-Ordered ToolResults and structured execution events.
+Ordered ToolResults, structured execution events, an ExecutionReport that
+records execution-attempt identity, per-Step dispatch/effect certainty, failure
+position, elapsed plan time, and the next-state fact for Runtime, plus bounded
+ExecutionUncertainty when trustworthy attempt closure evidence is unavailable.
 
 ### Deliverables
 
-Sequential dispatch, pre-execution policy and approval revalidation, timeout
-handling, stop-on-failure behavior, and in-memory audit evidence.
+Sequential dispatch in exact approved order; immediate Policy and applicable
+Approval revalidation for the current invocation; process-local one-time
+Approval consumption bound to attempt creation before Runtime enters
+`EXECUTING`; L3 challenge generation, single-use Confirmation consumption, and
+adjacent dispatch for every L3 invocation; plan elapsed-time recording;
+stop-on-failure with no automatic retry; a Gateway-internal dispatch receipt;
+and sanitized in-memory audit evidence. Runtime gains same-process governed
+resumption of an exact paused Outcome. Interactive CLI Commit immediately
+resumes that exact Outcome in the same process; approval issuance APIs do not
+implicitly dispatch.
+
+The first consumed Approval for one exact Plan Hash blocks sibling Approvals
+from starting a second attempt. Each attempt permits only one active Executor
+call, including while an L3 Confirmation reader is running. Missing or invalid
+abort reports are revalidated through the same Runtime boundary as ordinary
+execution reports; failed closure is represented by ExecutionUncertainty, not
+assumed safe.
+
+The current synchronous Mock Gateway remains authoritative for each Tool's
+registered timeout. It measures elapsed time after handler return and emits
+`tool_timeout`. Executor records total plan elapsed time, treats
+`tool_timeout` as terminal for the attempt, and never claims to interrupt,
+cancel, or preempt the handler.
 
 ### Acceptance Criteria
 
-Executor never plans, changes arguments, bypasses Policy, or silently retries a
-dangerous operation. L2/L3 steps require valid approval. Context and
-verification evidence requests also pass through Policy and Executor. Every
-definite failure enters `FAILED`; structured outcome facts distinguish an
-early failure from failure after prior success. Full execution success enters
-`VERIFYING`, never directly `COMPLETED`.
+Executor never plans, changes arguments, bypasses Policy, or silently retries
+an operation. It validates every precondition that applies to the current
+invocation before that invocation; a later L3 Confirmation is obtained only
+when its exact Step is next. L2/L3 steps require valid approval, and each L3
+invocation requires `CONFIRM <challenge-hash>` for the complete bound
+challenge. Confirmation is not a Runtime state.
+
+ExecutionPlan contains between 1 and 64 Steps. Oversized or bypass-constructed
+Plans are rejected by Executor before any dispatch.
+
+Only an `OBSERVE`/`ACTION` prefix may run in `EXECUTING`; only the trailing
+`VERIFY` suffix may run in `VERIFYING`. Verification evidence Steps pass
+through Policy and Executor. Context collection stays a pure consumer of
+supplied evidence through Phase 7; linked observation Tasks are owned by Phase
+8. Every definite failure enters `FAILED`; ExecutionReport distinguishes zero
+dispatch, handler dispatch, effect pending Verification, and effect
+uncertainty. Full action-prefix success enters `VERIFYING`, never directly
+`COMPLETED`.
+
+If an attempt cannot produce a trustworthy final report and safe abort also
+cannot be confirmed, the stable failure is `execution_abort_uncertain`.
+Runtime preserves only a hash-bound prior trusted awaiting-verification report,
+when present. Once a dispatch-capable boundary has been called, uncertainty is
+`UNKNOWN/UNKNOWN` with human intervention required. CLI and structured audit
+output make this condition visible without inventing per-Step facts.
+
+An L3 Tool may appear only in an `ACTION` Step; an L3 `OBSERVE` or `VERIFY`
+Step fails structural validation before dispatch.
+
+The bundled CLI is the only supported Phase 5 production Confirmation adapter.
+It requires interactive input and output TTYs plus exact
+`CONFIRM <challenge-hash>` input. Runtime/Executor reader injection is a
+trusted process-local test seam, not proof of human provenance, and must not be
+connected to a model, Skill, Tool, pipe, or environment value. The default
+Registry has no L3 Tool. Before any production L3 Tool is registered, an
+independently reviewed design must bind this seam to a verifiable interactive
+source; otherwise production L3 remains unavailable.
+
+The Gateway-internal dispatch receipt records whether the handler boundary was
+entered. It does not change Tool Protocol v1, ToolResult v1, Contract Hashes, or
+public Tool output.
+
+Executor and Runtime independently revalidate every retained receipt/report
+result against the exact frozen Registry Contract, including redaction,
+declared errors, timeout, and evidence projection. Retained evidence is deeply
+immutable. A later verification or abort report must monotonically extend the
+last trusted cumulative report and cannot erase prior dispatch facts.
 
 ### Test Requirements
 
-Fake Tool tests cover order, timeouts, missing approval, plan tampering, unknown
-Tools, mid-plan failure, stop-on-failure, and absence of silent retries.
+Recording Fake Tool tests cover exact order and arguments, role ordering,
+Runtime state segmentation, Gateway-owned synchronous timeouts, plan elapsed
+time, missing/expired/consumed Approval, Plan or Policy tampering, unknown
+Tools, pre-dispatch and post-dispatch failures, mid-plan stop behavior, and
+absence of automatic retries. Concurrency and injected boundary-failure tests
+prove at-most-once process-local consumption, burned authorization after
+consumption, and no false claim of durable crash recovery or remote
+transactional atomicity. L3 tests
+cover the complete challenge hash, wrong/expired/replayed confirmation,
+multiple L3 Steps, reentrant reader rejection, and immediate
+consumption-to-dispatch adjacency. Hostile boundary tests cover contradictory
+receipts, invalid Gateway error claims, forged success and abort reports,
+pre-dispatch abort double failure, post-action clock/abort double failure,
+verification-close tampering, prior-report Hash retention, uncertainty audit
+redaction, truncated cumulative reports, contract-invalid or secret-bearing
+results, immutable retained evidence, and sibling Approval single consumption.
+Protocol tests prove the internal receipt does not alter ToolResult v1.
 
 ### Out of Scope
 
@@ -443,43 +571,89 @@ remote server mutation.
 
 ## Phase 6 — Verifier
 
+Status: Implemented (2026-08-01)
+
 ### Goal
 
 Determine whether execution achieved the stated goal using structured evidence.
 
 ### Inputs
 
-ExecutionPlan verification criteria, ToolResults, and verification evidence
-from typed verification steps already included in the approved plan and
-obtained through Executor.
+ExecutionPlan v2 mandatory verification criteria, ToolResults, any
+Contract-required verification evidence already included in the approved Plan
+and obtained through Executor, plus Runtime-owned evidence acceptance context.
 
 ### Outputs
 
-A structured VerificationResult with evidence and failure reasons.
+A strict, immutable VerificationResult with identity bindings, ordered checks,
+evidence references, stable failure reasons, effect closure, human-intervention
+fact, and canonical content Hash.
 
 ### Deliverables
 
-Pure deterministic verifiers, evidence requirements, missing-evidence handling,
-and Runtime integration.
+Pure deterministic verifiers, strict criteria and context models, conservative
+freshness, evidence requirements, missing-evidence handling, effect closure,
+and Runtime integration. The only v1 kinds are `equals`, `numeric_bounds`,
+`expected_state`, and `health_status`; dynamic paths and executable evaluators
+are forbidden. Runtime supplies only strictly rebuilt isolated Plan/result/
+context copies to an injected Verifier, independently recomputes the verdict,
+binds every check and report-result reference into RuntimeOutcome, and emits a
+hash-only `verification_audit`. Terminal CLI Review displays each criterion's
+complete exact definition.
 
 ### Acceptance Criteria
 
-Verifier never invokes a Tool, plans, changes permissions, or executes recovery.
-Missing, stale, malformed, or contradictory evidence cannot produce success.
-A failed verification stops Runtime and enters `FAILED`. If a mutating
-operation was dispatched and cannot be verified, the structured outcome marks
-the remote effect unknown and requires human intervention.
+Verifier never invokes a Tool, plans, changes permissions, or requests,
+initiates, or executes recovery. Every Plan has at least one ordered mandatory
+criterion and every check is one-to-one and in order. Missing, stale,
+malformed, contradictory, unplanned, reordered, or identity-invalid evidence
+cannot produce success.
+
+Runtime takes one trusted local UTC sample after validating the cumulative
+report and uses that same sample for `evidence_accepted_at` and `evaluated_at`.
+It sets `collection_duration_ms` to the larger of Executor's total report
+duration and the Runtime-observed `EXECUTING`-entry-to-acceptance elapsed time
+rounded up to milliseconds, capped at 3,600,000 ms. This local receipt fact is
+not a remote event timestamp. Only an all-pass, hash-valid `PASSED` result
+reaches `COMPLETED`. Runtime strictly rebuilds isolated inputs and the returned
+result, then independently recomputes the verdict; content Hash alone cannot
+make a forged pass trustworthy, and duplicate Invocation IDs are rejected.
+
+Every `VERIFY` Step is Contract-declared, criterion-bound, read-only, and
+non-L3, and every required verification reference is covered. Phase 6 accepts
+at most one mutating source Step per Plan, and every mutating source Step must
+use the `ACTION` role. Every required verifier for that
+mutation must have a `numeric_bounds`, `expected_state`, or `health_status`
+postcondition; a provenance-only `equals` criterion is insufficient.
+
+RuntimeOutcome binds every check identity and every ordered evidence reference,
+including each exact result Hash. `verification_audit` contains only IDs,
+hashes, statuses, stable reasons, effect/human closure, and check/reference
+metadata; it never contains raw evidence. A thrown or incomplete Verifier is
+`VERIFIER_FAILED`; an invalid or recomputation-mismatched returned result is
+`VERIFIER_RESULT_INVALID`.
+
+Read-only work has effect `NONE`; pending mutation becomes `VERIFIED` only on
+pass. Any failed or inconclusive pending mutation enters `FAILED` with effect
+`UNKNOWN` and human intervention required.
 
 ### Test Requirements
 
-Tests cover pass, fail, missing evidence, malformed evidence, contradictory
-evidence, multiple steps, and confirmation that Verifier has no Tool Gateway
-dependency.
+Tests cover all four strict evaluators, pass, fail, type errors, missing/stale/
+malformed/contradictory evidence, multiple criteria, Plan/Approval v2 Hash
+binding, conservative freshness boundaries, self-evidence without duplicate
+dispatch, complete required-reference coverage, meaningful independent
+read-only verification for one mutation, rejection of multiple mutation Steps,
+isolated injected inputs, exact Outcome/audit closure, distinct Verifier
+exception versus invalid-result reasons, full terminal CLI criterion display,
+hostile result closure, and confirmation that Verifier has no Tool Gateway or
+recovery dependency.
 
 ### Out of Scope
 
 LLM verification, direct Tool calls, Incident persistence, automatic recovery,
-and rollback execution.
+rollback execution, multiple mutating source Steps, and implicit
+action-to-criterion/effect inference.
 
 ## Phase 7 — Local Model Adapter
 
@@ -584,21 +758,36 @@ IncidentRecords and read-only historical context.
 ### Deliverables
 
 SQLite and SQLAlchemy schema, Alembic migration, append-only create/read
-repository, append-only Approval audit events, unique execution-attempt key,
-transaction boundary, retention metadata, and redaction enforcement.
+repositories, an Approval-owned AuthorizationJournal, a
+Runtime/Executor-owned ExecutionJournal, Incident Memory audit projections, a
+unique execution-attempt key for idempotent local event recovery only,
+transaction boundaries, retention metadata, and redaction enforcement. These
+logical owners may share one physical SQLite database but never use Incident
+Memory as authorization input. ExecutionJournal includes explicit attempt
+closure and closure-uncertainty evidence; missing closure is never inferred as
+zero dispatch.
 
 ### Acceptance Criteria
 
-Memory never participates in permission or approval decisions. No secret is
-stored. Incident relationships are complete and schema changes always use a
-documented, tested migration. Task, plan snapshot/hash, approval/audit
-references, execution intent, result, and verification are appended as ordered,
-locally atomic events; the plan never claims atomicity with remote side effects.
-If verified work cannot be persisted, Runtime enters `FAILED`, reports a
-structured storage error that distinguishes the verified remote effect from
-the failed local evidence commit, and does not silently retry. Cross-process
-pre-dispatch resume requires an unexpired, unconsumed approval; a consumed
-approval may resume only its bound execution attempt.
+Memory never participates in permission or approval decisions. Approval
+reconstructs authority only from its own AuthorizationJournal; Memory receives
+redacted, non-authoritative projections. No secret is stored. Incident
+relationships are complete and schema changes always use a documented, tested
+migration. Task, plan snapshot/hash, authorization events, execution intent,
+result, and verification are appended as ordered, locally atomic events; the
+plan never claims atomicity with remote side effects. If verified work cannot
+be persisted, Runtime enters `FAILED`, reports a structured storage error that
+distinguishes the verified remote effect from the failed local evidence
+commit, and does not silently retry. Cross-process pre-dispatch resume requires
+an unexpired, unconsumed approval plus current Plan, Policy, and Tool Metadata
+revalidation. A consumed approval may resume only its exactly bound,
+still-unexpired attempt and only when no mutating dispatch intent has an
+unknown outcome; recovery never automatically redispatches a mutating Tool.
+Persisted RuntimeOutcome/Incident projections and their ordinary content
+Hashes are never authority or authenticity proof. Before recovery trusts a
+verification fact, the owning journals and storage-integrity boundary must
+detect coordinated rewrites and the Runtime must recompute all applicable
+semantic bindings.
 
 ### Test Requirements
 

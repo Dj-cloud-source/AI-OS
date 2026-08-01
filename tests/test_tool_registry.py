@@ -7,6 +7,7 @@ import pytest
 import ai_server.tools.registry as registry_module
 from ai_server.models.system_status import GetSystemStatusArguments, SystemStatus
 from ai_server.models.tool import (
+    RiskLevel,
     SideEffectKind,
     ToolMetadata,
     ToolRegistryRecord,
@@ -118,6 +119,22 @@ def test_real_artifacts_register_exact_identity_and_hashes_without_dispatch(
     assert record.status is ToolRegistryStatus.REGISTERED
 
 
+def test_default_registry_contains_only_the_local_mock_l0_tool() -> None:
+    """The production bootstrap exposes no real or elevated capability."""
+    registry = build_default_registry()
+    key = (GET_SYSTEM_STATUS_TOOL_ID, GET_SYSTEM_STATUS_TOOL_VERSION)
+    metadata_snapshot = registry.metadata_snapshot()
+    record_snapshot = registry.record_snapshot()
+
+    assert registry.is_frozen is True
+    assert tuple(metadata_snapshot) == (key,)
+    assert tuple(record_snapshot) == (key,)
+    assert metadata_snapshot[key].risk_level is RiskLevel.L0
+    assert metadata_snapshot[key].side_effects.mutates_remote_state is False
+    assert metadata_snapshot[key].side_effects.kind is SideEffectKind.NONE
+    assert record_snapshot[key].status is ToolRegistryStatus.REGISTERED
+
+
 @pytest.mark.parametrize(
     ("tool_id", "version"),
     [
@@ -184,6 +201,35 @@ def test_registry_rejects_forged_authoritative_metadata_projection(
     )
 
     with pytest.raises(InvalidToolDefinitionError, match="immutable metadata"):
+        ToolRegistry().register(make_definition())
+
+
+def test_registry_revalidates_forged_low_risk_mutating_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = load_real_artifacts()
+    mutating_effects = ToolSideEffects(
+        mutates_remote_state=True,
+        kind=SideEffectKind.SERVICE_STATE_CHANGE,
+    )
+    forged_contract = artifacts.contract.model_copy(
+        update={"side_effects": mutating_effects},
+    )
+    forged_metadata = artifacts.metadata.model_copy(
+        update={"side_effects": mutating_effects},
+    )
+    forged_artifacts = replace(
+        artifacts,
+        contract=forged_contract,
+        metadata=forged_metadata,
+    )
+    monkeypatch.setattr(
+        registry_module,
+        "load_tool_artifacts",
+        lambda *args, **kwargs: forged_artifacts,
+    )
+
+    with pytest.raises(InvalidToolDefinitionError, match="Contract is malformed"):
         ToolRegistry().register(make_definition())
 
 

@@ -2,8 +2,8 @@
 
 Version: MVP v1
 
-Status: Phase 2 local Mock-only protocol implemented; this prose alone never
-registers a Tool
+Status: Phases 2 and 5 implemented; the default Registry remains local
+Mock-only, and this prose alone never registers a Tool
 
 ---
 
@@ -116,7 +116,7 @@ The machine-readable Tool contract must contain the following fields.
 | `timeout_ms` | Maximum invocation duration |
 | `idempotent` | Whether retrying has no additional externally visible effect |
 | `automatic_retry` | Whether automatic retry is permitted |
-| `verification` | Independent verification requirements |
+| `verification` | Required structured evidence plus exact registered read-only verification Tool references; an empty Tool list has the self-evidence meaning defined below |
 | `rollback` | Rollback requirements and boundary |
 | `replay_fixtures` | Sanitized recorded or mock fixtures |
 
@@ -300,10 +300,29 @@ The minimum approval implications are:
 | `L2` | Explicit human Approval / Commit |
 | `L3` | Explicit human Approval / Commit plus immediate Manual Confirmation |
 
+`L0` and `L1` are read-only classes. Their Contract must declare
+`mutates_remote_state: false`; Contract validation and Registry registration
+both reject a low-risk mutating declaration, including a bypass-constructed
+model. `L2` and `L3` may still describe read-only operations, but that never
+lowers their approval requirement.
+
 The immediate L3 confirmation occurs at the execution boundary and expires if
 execution does not begin within the Policy-configured confirmation window.
-It is single-use and binds the Execution Approval ID, Plan Hash, exact Tool
-Step, concrete Arguments, and expiration. Replay or reuse is forbidden.
+It is single-use. Its Challenge Hash covers the complete strict
+`ManualConfirmationChallenge` except `challenge_hash` itself: Schema Version,
+Authorization Hash, Approval ID, Approval Plan Hash, Approval Record Hash,
+Approval Expiration, Execution Attempt ID, Invocation ID, Step Index/ID/Role,
+Tool ID/Version, Contract Hash, Implementation Hash, Arguments Hash, and Target
+Reference. The issued record additionally has a short expiration. CLI accepts only exact
+`CONFIRM <challenge-hash>`. Replay or reuse is forbidden. Confirmation is an
+invocation gate, not a Runtime state. The bundled CLI is the only supported
+Phase 5 production adapter and requires interactive input and output TTYs.
+Runtime/Executor reader injection is a trusted process-local test seam, not
+proof of human provenance, and must not be connected to a model, Skill, Tool,
+pipe, or environment value. The default Registry has no L3 Tool. Before a
+production L3 Tool is registered, an independently reviewed design must bind
+Confirmation to a verifiable interactive source; otherwise production L3
+remains unavailable.
 
 The reviewed local Policy Profile v1.1 uses Profile Schema v2 to provide
 bounded Approval configuration: Review Session and Plan Approval TTLs are at
@@ -313,10 +332,19 @@ these values.
 
 The Effective Plan Risk is at least the maximum authoritative risk among its
 ordered Tool Steps. Policy may raise the requirement for target scope or
-combined side effects, but cannot lower it. Phase 4 implements the confirmation
-record and consumption protocol without dispatch. L3 execution remains denied
-until Phase 5 atomically connects confirmation consumption to the exact
-invocation boundary and tests that connection.
+combined side effects, but cannot lower it. Phase 4 implemented the
+confirmation record and consumption protocol without dispatch and therefore
+kept a fixed L3 denial. Phase 5 connects confirmation consumption to the exact
+invocation boundary. The default Registry remains L0-only; removing the
+temporary framework denial neither registers nor authorizes an L3 Tool.
+
+For Phase 5, Plan Approval consumption is process-local and thread-safe when
+Executor creates the exact attempt; Runtime enters `EXECUTING` only after that
+linearization. A crash before dispatch still burns the Approval. For an L3
+invocation, Confirmation consumption is additionally followed immediately by
+dispatch of the already-bound ToolCall in the same Executor call stack. No
+consumed authority can be restored or reused for an automatic retry. This is
+not transactional atomicity with a remote side effect.
 
 An execution approval binds:
 
@@ -325,6 +353,8 @@ An execution approval binds:
 - exact Tool identity, Contract Hash, and Implementation Hash
 - target, Registry risk, target scope, side effects, redaction, Verification,
   and rollback requirements
+- the complete ordered Plan-level `verification_criteria`, including expected
+  values, evidence Step binding, evaluator version, and freshness limit
 - the applicable Policy Decision Hash and approval requirements
 - the Expiration
 
@@ -425,9 +455,13 @@ duration_ms
 ```
 
 Gateway validates the complete result first against the global Result Schema
-and then against the exact registered Contract output Schema. Runtime and
-Executor also reject any result identity that differs from the approved
-ToolCall.
+and then against the exact registered Contract output Schema. Before retaining
+any receipt or report result, Executor and Runtime independently resolve the
+same frozen Registry entry and revalidate exact identity, arguments, target,
+payload model, Contract output Schema, declared error, timeout, forbidden
+content, redaction, and evidence projection. A failed revalidation discards the
+result and fails closed. Retained `evidence` JSON containers are deeply
+immutable; serialization returns fresh ordinary JSON objects and arrays.
 
 For every structured result:
 
@@ -478,6 +512,63 @@ Executor catches them and converts them into its explicit Runtime domain
 failure; Gateway does not fabricate a result envelope from an untrusted call.
 No boundary failure may silently become success or authorize a retry.
 
+## Internal Dispatch Receipt
+
+Phase 5 adds a Gateway-produced, process-local internal receipt that records
+whether the private typed handler boundary was entered. It exists only so
+Executor can construct a truthful ExecutionReport. It is not part of Tool
+Protocol v1 or ToolResult v1, is not returned by a Tool, and does not change any
+Contract Schema, Contract Hash, or public result field. Executor strictly
+validates its shape; a missing or untrusted receipt is handled conservatively
+as unknown rather than inferred as non-dispatch.
+
+ExecutionReport is cumulative. After Runtime accepts an
+`AWAITING_VERIFICATION_DISPATCH` report, every verification or abort report
+must preserve its exact records and events as an unchanged prefix and must add
+closure progress. A shorter, rewritten, or replayed report is rejected; it
+cannot erase earlier handler-dispatch evidence.
+
+The receipt supports these conservative facts:
+
+| Handler boundary | Dispatch certainty | Effect certainty |
+| --- | --- | --- |
+| Proven not entered | `NOT_DISPATCHED` | `NONE` |
+| Entered for a read-only Tool | `HANDLER_DISPATCHED` | `NONE` |
+| Entered for a mutating Tool and returned success | `HANDLER_DISPATCHED` | `PENDING_VERIFICATION` |
+| Entered for a mutating Tool but the outcome is uncertain | `HANDLER_DISPATCHED` | `UNKNOWN` |
+
+Entering a handler does not prove that a side effect occurred or succeeded.
+When Gateway cannot prove a failure happened before handler entry, Executor
+must not report `NOT_DISPATCHED`. An `UNKNOWN` mutating effect fails closed and
+requires human intervention. If Executor cannot obtain a trustworthy receipt
+at all, both dispatch and effect are `UNKNOWN`; this is an Executor fallback,
+not a value emitted by the receipt.
+
+## Attempt Closure Uncertainty
+
+An internal receipt supports per-invocation facts only after Executor produces
+a fully revalidated ExecutionReport. If the final report is missing or
+untrusted and Runtime cannot confirm that the attempt was safely aborted,
+Runtime emits a separate hash-bound `ExecutionUncertainty` rather than
+fabricating Tool protocol evidence.
+
+- It binds the exact execution-attempt authorization and optionally the Hash of
+  the last trusted `AWAITING_VERIFICATION_DISPATCH` report.
+- Before any dispatch-capable Executor call, failed closure is represented as
+  `NOT_DISPATCHED` / `NONE` without invented Step or Invocation fields.
+- After a dispatch-capable call, missing trustworthy closure is represented as
+  `UNKNOWN` / `UNKNOWN` with `human_intervention_required=true`.
+- The stable reason is `execution_abort_uncertain`; this never authorizes retry
+  or redispatch.
+- `execution_uncertainty_audit` contains attempt-level IDs, authorization and
+  evidence Hashes, certainty, reason, and verification status. Per-Step Tool,
+  Target, result, and duration fields appear only when backed by a trusted
+  ExecutionReport.
+
+`ExecutionUncertainty` is a Runtime/Executor evidence contract, not ToolResult
+v1 and not a new receipt value. It does not alter Tool Contract Schemas or
+Contract Hashes.
+
 ## Phase 2 Synchronous Timeout
 
 Phase 2 invokes only the deterministic local Mock handler synchronously. Gateway
@@ -488,8 +579,14 @@ bounded by the registered timeout.
 
 This is a post-return elapsed-time check. It does not interrupt, cancel, kill,
 isolate, or preempt a running handler and is not a network or transport
-timeout. Phase 2 has no automatic retry. Real cancellation and transport
-timeouts require a later approved execution design.
+timeout. Phase 2 has no automatic retry.
+
+Phase 5 preserves Gateway as the authority for this current synchronous
+single-invocation timeout. Executor records monotonic elapsed time for the
+whole plan, treats a `tool_timeout` result as terminal for the attempt, and
+never automatically retries it. Plan elapsed-time recording does not add
+preemption, cancellation, or a transport timeout. Real cancellation and
+transport timeouts require a later transport-specific approved design.
 
 ---
 
@@ -572,13 +669,45 @@ exception messages, replay, or Memory.
 
 # Verification
 
-Verification is independent from Tool execution.
+The Verification decision is independent from Tool execution. A read-only Tool
+may still supply its own Contract-valid result as evidence under the explicit
+self-evidence rule below; this does not let the Tool decide the verdict.
 
 The Tool Contract declares expected evidence and exact registered read-only
-Tool references. Planner includes every verification Step, Tool Version,
-concrete Argument, and expected condition in the Execution Plan before Policy
-and Approval. The executing Tool must not declare its operation successful
-solely because the invocation returned.
+Tool references. `verification.tools` has one precise meaning:
+
+- for a read-only Tool, an empty list means its own successful, structured,
+  Contract-valid ToolResult may provide verification evidence;
+- a non-empty list requires a matching, criterion-bound `VERIFY` Step for every
+  listed Tool reference; required references cannot be partially covered;
+- a mutating Tool must declare at least one independent read-only verification
+  Tool; its own Action result is never sufficient to close the side effect.
+
+Every referenced verification Tool must itself have
+`mutates_remote_state=false`. A `VERIFY` Step must also be non-L3 even when an
+L3 Tool is read-only. Contract registration and Plan validation reject a
+mutating or L3 verification Tool, an undeclared reference, a duplicate
+reference, an unbound required reference, or a mutating Contract without
+independent verification. A Skill, Planner, or model cannot weaken these
+rules.
+
+`verification.evidence_fields` is the minimum safe evidence projection the
+Contract requires Runtime to retain; it is not an open-ended field selector
+and is not a list of every typed `data` field. A criterion with
+`source=evidence` may use only a field present in this exact list. A typed-data
+criterion may use only the closed fields implemented for the exact registered
+output model, and those reads still pass output Schema and redaction checks.
+No criterion can use this distinction to retain an otherwise redacted field.
+
+Every ExecutionPlan v2 contains one or more ordered Plan-level
+`verification_criteria`; every criterion is mandatory in MVP v1. Planner
+includes every Contract-required verification Step, exact Tool Version,
+concrete Arguments, and criterion before Policy and Approval. The Approval
+Snapshot v2 Hash binds the complete criteria and their order. A v1 Plan or
+Approval Snapshot cannot be used at this boundary.
+The terminal CLI Review displays each criterion's complete exact serialized
+definition, not only a human summary, so the reviewer can inspect the same
+content that the Snapshot Hash binds.
 
 Verification:
 
@@ -587,17 +716,152 @@ Verification:
 - remains subject to Policy and the same Plan Hash
 - never uses arbitrary Shell
 - cannot be removed by a Skill
+- never treats a Tool-provided timestamp as Runtime evidence acceptance time
 
-Verifier never invokes a Tool. Runtime asks Executor to run the pre-approved
-verification Steps during `VERIFYING`, validates their result bindings, and
-then passes the structured results to Verifier. An unplanned evidence request
-ends the current attempt as `FAILED` with a stable expansion reason and creates
-a linked new attempt with a new Plan and, when required, a new Human Execution
-Approval. Runtime never jumps from `VERIFYING` or `EXECUTING` back to
-`PLANNING`.
+Each criterion binds unique `criterion_id`, exact `evidence_step_id`, literal
+`mandatory=true`, integer `maximum_age_ms` from 0 through 30000 (default
+30000), literal `evaluator_version="1"`, and
+exactly one of these four kinds:
 
-A failed or inconclusive Verification must not be reported as completed
-success.
+| Kind | Required behavior |
+| --- | --- |
+| `equals` | `source=data|evidence`, `field=source|simulated|target|hostname`, and a strict `str|bool` expected value; no coercion |
+| `numeric_bounds` | `field=cpu_percent|memory_percent|disk_percent` with inclusive `minimum` and `maximum`; boolean and non-finite values fail |
+| `expected_state` | Exact `service_name` and `expected_state=running|stopped`; a missing or duplicate name fails |
+| `health_status` | `expected_status=healthy|unhealthy` plus `maximum_utilization_percent`; healthy means a non-empty set of unique service names, all services running, and all three utilization values at or below the cap |
+
+The four variants are a strict discriminated union with kind-specific expected
+fields. There is no generic fifth evaluator, dynamic JSONPath, dotted path,
+regex, expression, callback, code hook, or script. Evidence extraction is
+statically implemented for the exact Tool ID, Tool Version, Result Schema, and
+evaluator version. The listed selectors are closed enums, not paths. Duplicate
+service names are contradictory evidence and fail even when the expected
+health status is `unhealthy`; with non-contradictory evidence, `unhealthy` is
+the negation of the defined healthy predicate. Unknown kinds or versions fail
+Plan validation before dispatch.
+
+Plan roles are ordered as an `OBSERVE`/`ACTION` prefix followed by a `VERIFY`
+suffix; an execution Step cannot occur after the first `VERIFY` Step. Runtime
+asks Executor to run only the prefix in `EXECUTING` and only the suffix in
+`VERIFYING`. An L3 Tool is valid only as an `ACTION` Step; L3 `OBSERVE` and
+`VERIFY` are rejected before dispatch. A `VERIFY` Step must be Contract-declared
+and referenced by a criterion; extra, unused, or duplicate evidence calls are
+invalid. Current read-only `get_system_status@1.0.0` declares no verification
+Tool and its criteria consume its original result, so Runtime does not invoke
+it a second time. Its default mandatory criteria use only the Contract-required
+`simulated`, `source`, and `target` projection. Although `hostname` is a
+supported safe fixed selector, it is not listed as required by this Contract
+and is not a default mandatory criterion.
+
+Every source Step whose Metadata declares `mutates_remote_state=true` must use
+the `ACTION` role. Phase 6 permits at most one mutating source Step per Plan.
+For that Step, every
+required verification Tool reference must have at least one meaningful
+postcondition criterion of kind `numeric_bounds`, `expected_state`, or
+`health_status`. An `equals` criterion that proves only provenance or target
+identity is insufficient to close a remote mutation. Multiple mutating source
+Steps remain unavailable until a separately reviewed design binds every action
+to its own criteria and effect disposition explicitly.
+
+Verifier never invokes a Tool. Runtime asks Executor to run only pre-approved,
+Contract-required verification Steps during `VERIFYING`, validates their
+result bindings, and then constructs a strict `VerificationContext`. The
+context binds Task, Plan digest, Execution Attempt, cumulative report Hash,
+Runtime-owned `evidence_accepted_at`, `collection_duration_ms`, the same
+trusted clock sample as `evaluated_at`, and `mutating_effect_pending`.
+
+The strict `VerificationContext` fields are `context_schema_version`,
+`task_id`, `plan_id`, `plan_digest`, `execution_attempt_id`,
+`execution_report_hash`, `evidence_accepted_at`, `evaluated_at`,
+`collection_duration_ms`, and `mutating_effect_pending`. A null acceptance time
+exists only to represent Runtime clock unavailability; it always produces
+`CLOCK_UNAVAILABLE` and can never pass verification. Context schema version is
+`"1"`, duration is an integer from 0 through 3600000, and every non-null time
+is exact timezone-aware UTC.
+
+After accepting the fully validated report, Runtime reads its trusted UTC clock
+once and uses the same sample for both `evidence_accepted_at` and
+`evaluated_at`. The acceptance time is not a remote event timestamp. Runtime
+sets the bounded collection duration to:
+
+```text
+collection_duration_ms = min(
+    max(
+        ExecutionReport.total_duration_ms,
+        ceil_ms(evidence_accepted_at - Runtime EXECUTING entered_at)
+    ),
+    3_600_000
+)
+```
+
+Freshness then uses the conservative lower bound on collection time:
+
+```text
+conservative_age_ms =
+    evaluated_at - evidence_accepted_at + collection_duration_ms
+```
+
+There is no second evaluation-time clock read. Invalid time order, malformed
+duration, or age beyond any criterion's hashed `maximum_age_ms` fails closed.
+
+Verifier returns an immutable, canonical-hash-bound `VerificationResult`
+binding the same identities. Its strict fields are `result_schema_version`,
+`task_id`, `plan_id`, `plan_digest`, `execution_attempt_id`,
+`execution_report_hash`, `evaluated_at`, `status`, `checks`,
+`evidence_references`, `failure_reasons`, `effect_disposition`,
+`human_intervention_required`, and `content_hash`. `VerificationStatus` and
+`VerificationCheckStatus` contain only `PASSED | FAILED`;
+`VerificationEffectDisposition` contains only `NONE | VERIFIED | UNKNOWN`.
+Result schema version is `"1"`.
+There is one ordered `VerificationCheckResult` per criterion and all
+`VerificationEvidenceReference` values are structured, Hash-only, and
+redacted. The closed `VerificationFailureReason` values and meanings are
+normative in `ARCHITECTURE.md#layer-9`; no free-string reason is permitted.
+Only all-pass mandatory checks can produce `PASSED`. Missing, stale,
+malformed, contradictory, unplanned, reordered, target-mismatched, or
+identity/hash-mismatched evidence produces `FAILED`.
+
+The content Hash is an integrity commitment, not proof that the verdict is
+true. Before calling an injected Verifier, Runtime exact-type rebuilds the
+Plan, each ToolResult, and VerificationContext and passes only those isolated
+copies; the injected component cannot mutate Runtime's retained authority.
+Runtime then exact-type rebuilds the returned result and independently invokes
+the trusted pure evaluator functions on its private original context. The
+returned result must exactly equal the recomputed result. Reused Invocation
+IDs, a Hash-valid forged pass, or any changed identity, check order, evidence
+reference, reason, effect, or human flag fails closed.
+
+`VERIFIER_FAILED` is reserved for a Verifier exception or inability to
+complete evaluation. `VERIFIER_RESULT_INVALID` is used when a returned object
+has an invalid type, structure, binding, order, Hash, effect closure, or differs
+from Runtime's independent recomputation. These reasons must remain distinct.
+
+For read-only work, a pass or fail has effect `NONE`. A pending mutating effect
+becomes `VERIFIED` only after a valid all-pass result; every other outcome is
+`UNKNOWN` with human intervention required. Verifier can only report that
+recovery should be considered. It cannot request, initiate, execute, or
+authorize recovery or rollback.
+
+If a Contract-required verification Tool fails before Verifier evaluation,
+Runtime does not fabricate a VerificationResult. It enters `FAILED`; read-only
+work retains effect `NONE`, while every pending mutation becomes `UNKNOWN` and
+requires human intervention. A terminal RuntimeOutcome binds the accepted
+VerificationResult and Hash, every check's criterion/evidence-Step/evaluator
+identity, and every ordered report result through its complete hash-bound
+evidence reference.
+
+Runtime emits a structured `verification_audit` for every produced
+VerificationResult. It contains only identity and content hashes, status,
+stable failure reasons, effect/human closure, check metadata, and
+Step/Invocation/result-Hash references. It never records raw evidence, raw
+observed values, or unredacted arguments.
+
+An unplanned evidence need ends the current attempt as `FAILED` with a stable
+expansion reason. A future phase may permit an explicit new Task and new Plan
+which follow the entire lifecycle and, when required, receive a new Human
+Execution Approval. Runtime never jumps from `VERIFYING` or `EXECUTING` back to
+`PLANNING`, and a failed or inconclusive Verification never produces
+`COMPLETED`.
 
 ---
 
@@ -870,12 +1134,38 @@ This specification is satisfied when:
   complete ToolResult envelope
 - pre-trust Gateway failures are explicit sanitized exceptions with zero
   dispatch, and post-resolution invocation failures are structured ToolResults
+- the Gateway-internal dispatch receipt reports handler entry for
+  ExecutionReport without altering ToolResult v1 or existing Contract Hashes
 - all results and errors are structured, bounded, and sanitized in the
   specified order
 - Phase 2 timeout is documented and tested as a synchronous post-return
   elapsed-time check without cancellation or retry
+- Executor treats `tool_timeout` as terminal, records plan elapsed time, and
+  does not claim preemption or transport-timeout behavior
+- Plan Approval consumption is process-local and single-use when Executor
+  creates the exact attempt, before Runtime enters `EXECUTING`; it is not
+  adjacent or atomic with dispatch
+- per-L3 Confirmation consumption is process-local, single-use, immediately
+  adjacent to the already-bound dispatch, and never described as atomic with a
+  remote side effect
+- every invocation waits only for the preconditions applicable to that exact
+  invocation; later L3 Confirmations are obtained only when their Step is next
+- ExecutionPlan contains 1–64 Steps; oversized or bypass-constructed Plans are
+  rejected before dispatch
+- Step roles are an `OBSERVE`/`ACTION` prefix followed by a `VERIFY` suffix,
+  with Runtime invoking each segment only in its matching state
+- every `VERIFY` Step is Contract-declared, criterion-bound, read-only, and
+  non-L3; every required verification reference is covered
+- Phase 6 Plans contain at most one mutating source Step, whose required
+  verification references use meaningful postconditions rather than only
+  provenance equality
 - Verification and rollback remain explicit and independently governed
 - Verifier consumes Runtime-provided results and never invokes Tool
+- Runtime uses one clock sample for evidence acceptance/evaluation, derives the
+  bounded conservative collection duration from both Executor and Runtime
+  elapsed evidence, and gives an injected Verifier only isolated rebuilt inputs
+- terminal outcomes and `verification_audit` preserve exact hash-bound closure
+  without retaining raw verification evidence
 - replay uses only sanitized recorded data, Mock Tools, or local fixtures
 - Fixture Hash removes only root `content_hash` before RFC 8785 and SHA-256
 - replay cannot invoke a production Tool or connect to production

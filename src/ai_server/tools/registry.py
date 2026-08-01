@@ -135,12 +135,13 @@ class ToolRegistry:
             raise InvalidToolDefinitionError(
                 "Tool registration artifacts failed validation"
             ) from None
+        validated_contract = _validate_contract(artifacts.contract)
         metadata = _validate_metadata(artifacts.metadata)
         validated_record = _validate_record(artifacts.record)
         _validate_registration_binding(
             metadata,
             validated_record,
-            artifacts.contract,
+            validated_contract,
             definition.input_model,
             definition.output_model,
             definition.handler,
@@ -162,7 +163,7 @@ class ToolRegistry:
         self._entries[key] = _RegisteredTool(
             metadata=metadata,
             record=validated_record,
-            contract=artifacts.contract,
+            contract=validated_contract,
             input_model=definition.input_model,
             output_model=definition.output_model,
             _handler=erased_handler,
@@ -203,6 +204,18 @@ def _validate_metadata(metadata: ToolMetadata) -> ToolMetadata:
         )
     except BaseException:
         raise InvalidToolDefinitionError("Tool metadata is malformed") from None
+
+
+def _validate_contract(contract: ToolContract) -> ToolContract:
+    if type(contract) is not ToolContract:
+        raise InvalidToolDefinitionError("Tool Contract is malformed")
+    try:
+        return ToolContract.model_validate(
+            contract.model_dump(mode="python", warnings="error"),
+            strict=True,
+        )
+    except BaseException:
+        raise InvalidToolDefinitionError("Tool Contract is malformed") from None
 
 
 def _validate_record(record: ToolRegistryRecord) -> ToolRegistryRecord:

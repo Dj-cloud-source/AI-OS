@@ -32,10 +32,12 @@ from ai_server.models.tool import (
     SideEffectKind,
     TargetReference,
     ToolMetadata,
+    ToolReference,
     ToolSideEffects,
     ToolTargetScope,
     VerificationRequirement,
 )
+from ai_server.models.verification import EqualityCriterion, ExpectedStateCriterion
 from ai_server.planner.service import SUPPORTED_REQUEST, Planner
 from ai_server.policy.artifact_loader import ValidatedPolicyArtifacts
 from ai_server.policy.engine import PolicyEngine
@@ -69,6 +71,8 @@ def make_metadata(
     risk_level: RiskLevel = RiskLevel.L0,
     resource_type: str = "local_system",
     maximum_targets: int = 1,
+    mutates_remote_state: bool = False,
+    verification_tools: tuple[ToolReference, ...] = (),
 ) -> ToolMetadata:
     """Build one strict synthetic Tool Metadata projection."""
     return ToolMetadata(
@@ -79,8 +83,10 @@ def make_metadata(
         description="Return deterministic simulated system status.",
         risk_level=risk_level,
         side_effects=ToolSideEffects(
-            mutates_remote_state=False,
-            kind=SideEffectKind.NONE,
+            mutates_remote_state=mutates_remote_state,
+            kind=(
+                SideEffectKind.SERVICE_STATE_CHANGE if mutates_remote_state else SideEffectKind.NONE
+            ),
         ),
         target_scope=ToolTargetScope(
             resource_type=resource_type,
@@ -97,6 +103,7 @@ def make_metadata(
         verification=VerificationRequirement(
             required=True,
             evidence_fields=("source",),
+            tools=verification_tools,
         ),
         rollback=RollbackRequirement(
             required=False,
@@ -141,17 +148,27 @@ def make_plan(
     """Build one immutable deterministic plan from one or more metadata entries."""
     entries = metadata or (make_metadata(),)
     step_reasons = reasons or tuple("Collect status." for _ in entries)
+    steps = tuple(
+        make_step(
+            entry,
+            step_id=f"status-{index}",
+            reason=step_reasons[index - 1],
+        )
+        for index, entry in enumerate(entries, start=1)
+    )
     return ExecutionPlan(
         plan_id=PLAN_ID,
         task_id=TASK_ID,
         target="local-mock",
-        steps=tuple(
-            make_step(
-                entry,
-                step_id=f"status-{index}",
-                reason=step_reasons[index - 1],
-            )
-            for index, entry in enumerate(entries, start=1)
+        steps=steps,
+        verification_criteria=(
+            EqualityCriterion(
+                criterion_id="mock-source",
+                evidence_step_id=steps[0].step_id,
+                source="evidence",
+                field="source",
+                expected="mock",
+            ),
         ),
     )
 
@@ -251,6 +268,218 @@ def test_default_reviewed_l0_capability_is_allowed() -> None:
     assert decision.approval_requirement is PolicyApprovalRequirement.NOT_REQUIRED
     assert decision.manual_confirmation_requirement is ManualConfirmationRequirement.NOT_REQUIRED
     assert decision.step_decisions[0].resolved_risk is RiskLevel.L0
+
+
+def test_policy_rejects_criterion_field_not_retained_by_tool_contract() -> None:
+    registry = build_default_registry()
+    metadata = registry.metadata_snapshot()[("get_system_status", "1.0.0")]
+    plan = make_plan(metadata)
+    criterion = plan.verification_criteria[0].model_copy(update={"field": "hostname"})
+    plan = plan.model_copy(update={"verification_criteria": (criterion,)})
+
+    with pytest.raises(PolicyEvaluationError, match="undeclared retained evidence"):
+        PolicyEngine(registry).evaluate(plan, make_context())
+
+
+def test_policy_requires_independent_criterion_bound_read_only_mutation_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier_metadata = make_metadata()
+    mutating_metadata = make_metadata(
+        tool_id="restart_mock_service",
+        risk_level=RiskLevel.L2,
+        mutates_remote_state=True,
+        verification_tools=(
+            ToolReference(
+                tool_id=verifier_metadata.tool_id,
+                version=verifier_metadata.version,
+            ),
+        ),
+    )
+    engine = make_synthetic_engine(
+        monkeypatch,
+        metadata=(mutating_metadata, verifier_metadata),
+        rules=(
+            make_rule(mutating_metadata, rule_id="mutation-rule"),
+            make_rule(verifier_metadata, rule_id="verification-rule"),
+        ),
+    )
+    action = make_step(mutating_metadata, step_id="restart-mock").model_copy(
+        update={"role": StepRole.ACTION}
+    )
+    criterion = EqualityCriterion(
+        criterion_id="action-self-report",
+        evidence_step_id=action.step_id,
+        source="evidence",
+        field="source",
+        expected="mock",
+    )
+    plan = ExecutionPlan(
+        plan_id=PLAN_ID,
+        task_id=TASK_ID,
+        target="local-mock",
+        steps=(action,),
+        verification_criteria=(criterion,),
+    )
+
+    with pytest.raises(PolicyEvaluationError, match="independent verification evidence"):
+        engine.evaluate(plan, make_context())
+
+
+def test_policy_rejects_mutating_observe_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier_metadata = make_metadata()
+    mutating_metadata = make_metadata(
+        tool_id="restart_mock_service",
+        risk_level=RiskLevel.L2,
+        mutates_remote_state=True,
+        verification_tools=(
+            ToolReference(
+                tool_id=verifier_metadata.tool_id,
+                version=verifier_metadata.version,
+            ),
+        ),
+    )
+    engine = make_synthetic_engine(
+        monkeypatch,
+        metadata=(mutating_metadata, verifier_metadata),
+        rules=(
+            make_rule(mutating_metadata, rule_id="mutation-rule"),
+            make_rule(verifier_metadata, rule_id="verification-rule"),
+        ),
+    )
+    mutating_observe = make_step(mutating_metadata, step_id="restart-mock")
+    verify = make_step(verifier_metadata, step_id="verify-restart").model_copy(
+        update={"role": StepRole.VERIFY}
+    )
+    plan = ExecutionPlan(
+        plan_id=PLAN_ID,
+        task_id=TASK_ID,
+        target="local-mock",
+        steps=(mutating_observe, verify),
+        verification_criteria=(
+            ExpectedStateCriterion(
+                criterion_id="service-running",
+                evidence_step_id=verify.step_id,
+                service_name="mock-api",
+                expected_state="running",
+            ),
+        ),
+    )
+
+    with pytest.raises(PolicyEvaluationError, match="must use the ACTION role"):
+        engine.evaluate(plan, make_context())
+
+
+def test_policy_requires_mutation_postcondition_and_single_effect_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier_metadata = make_metadata()
+    mutating_metadata = make_metadata(
+        tool_id="restart_mock_service",
+        risk_level=RiskLevel.L2,
+        mutates_remote_state=True,
+        verification_tools=(
+            ToolReference(
+                tool_id=verifier_metadata.tool_id,
+                version=verifier_metadata.version,
+            ),
+        ),
+    )
+    engine = make_synthetic_engine(
+        monkeypatch,
+        metadata=(mutating_metadata, verifier_metadata),
+        rules=(
+            make_rule(mutating_metadata, rule_id="mutation-rule"),
+            make_rule(verifier_metadata, rule_id="verification-rule"),
+        ),
+    )
+    first_action = make_step(mutating_metadata, step_id="restart-one").model_copy(
+        update={"role": StepRole.ACTION}
+    )
+    second_action = first_action.model_copy(update={"step_id": "restart-two"})
+    verify = make_step(verifier_metadata, step_id="verify-restart").model_copy(
+        update={"role": StepRole.VERIFY}
+    )
+    provenance_only = ExecutionPlan(
+        plan_id=PLAN_ID,
+        task_id=TASK_ID,
+        target="local-mock",
+        steps=(first_action, verify),
+        verification_criteria=(
+            EqualityCriterion(
+                criterion_id="provenance-only",
+                evidence_step_id=verify.step_id,
+                source="evidence",
+                field="source",
+                expected="mock",
+            ),
+        ),
+    )
+    multiple_mutations = provenance_only.model_copy(
+        update={
+            "steps": (first_action, second_action, verify),
+            "verification_criteria": (
+                ExpectedStateCriterion(
+                    criterion_id="service-running",
+                    evidence_step_id=verify.step_id,
+                    service_name="mock-api",
+                    expected_state="running",
+                ),
+            ),
+        }
+    )
+
+    with pytest.raises(PolicyEvaluationError, match="independent verification evidence"):
+        engine.evaluate(provenance_only, make_context())
+    with pytest.raises(PolicyEvaluationError, match="at most one mutating"):
+        engine.evaluate(multiple_mutations, make_context())
+
+
+def test_policy_rejects_mutating_tool_in_verify_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = make_metadata(
+        tool_id="mutating_verifier",
+        risk_level=RiskLevel.L2,
+        mutates_remote_state=True,
+    )
+    engine = make_synthetic_engine(
+        monkeypatch,
+        metadata=(metadata,),
+        rules=(make_rule(metadata),),
+    )
+    verify = make_step(metadata, step_id="mutating-verify").model_copy(
+        update={"role": StepRole.VERIFY}
+    )
+    plan = ExecutionPlan(
+        plan_id=PLAN_ID,
+        task_id=TASK_ID,
+        target="local-mock",
+        steps=(verify,),
+        verification_criteria=(
+            EqualityCriterion(
+                criterion_id="unsafe-verify",
+                evidence_step_id=verify.step_id,
+                source="evidence",
+                field="source",
+                expected="mock",
+            ),
+        ),
+    )
+
+    with pytest.raises(PolicyEvaluationError, match="read-only"):
+        engine.evaluate(plan, make_context())
+
+
+def test_policy_exposes_only_exact_frozen_authoritative_metadata() -> None:
+    registry = build_default_registry()
+    engine = PolicyEngine(registry)
+    expected = registry.metadata_snapshot()[("get_system_status", "1.0.0")]
+
+    assert engine.metadata_for("get_system_status", "1.0.0") == expected
+    assert engine.metadata_for("missing_tool", "1.0.0") is None
 
 
 def test_planner_does_not_copy_risk_into_the_execution_plan() -> None:
@@ -377,43 +606,60 @@ def test_l2_always_requires_human_plan_approval(
     assert decision.manual_confirmation_requirement is ManualConfirmationRequirement.NOT_REQUIRED
 
 
-def test_l3_is_denied_until_per_invocation_confirmation_exists(
+def test_exact_l3_rule_derives_both_human_authorization_gates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phase 3 reports L3 gates but denies execution until Phase 4."""
+    """Policy allows exact L3 capabilities while deriving both mandatory gates."""
     metadata = make_metadata(risk_level=RiskLevel.L3)
     engine = make_synthetic_engine(
         monkeypatch,
         metadata=(metadata,),
         rules=(make_rule(metadata),),
     )
+    observe_plan = make_plan(metadata)
+    action_step = observe_plan.steps[0].model_copy(update={"role": StepRole.ACTION})
+    plan = observe_plan.model_copy(update={"steps": (action_step,)})
 
-    decision = engine.evaluate(make_plan(metadata), make_context())
+    decision = engine.evaluate(plan, make_context())
 
-    assert decision.effect is PolicyEffect.DENY
-    assert decision.reason_code is PolicyReasonCode.L3_CONFIRMATION_UNAVAILABLE
+    assert decision.effect is PolicyEffect.ALLOW
+    assert decision.reason_code is PolicyReasonCode.ALLOWED
     assert decision.effective_risk is RiskLevel.L3
     assert decision.approval_requirement is PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL
     assert decision.manual_confirmation_requirement is ManualConfirmationRequirement.PER_INVOCATION
+    assert decision.step_decisions[0].effect is PolicyEffect.ALLOW
+    assert decision.step_decisions[0].resolved_risk is RiskLevel.L3
 
 
 @pytest.mark.parametrize(
-    "rule_variant",
-    ["missing-capability", "different-operator"],
+    ("denial_case", "expected_reason", "identity_resolved"),
+    [
+        ("missing-rule", PolicyReasonCode.TOOL_NOT_ALLOWED, True),
+        ("wrong-operator", PolicyReasonCode.OPERATOR_NOT_ALLOWED, True),
+        ("unknown-tool-identity", PolicyReasonCode.UNKNOWN_TOOL, False),
+        ("integrity-mismatch", PolicyReasonCode.TOOL_INTEGRITY_MISMATCH, True),
+        ("target-mismatch", PolicyReasonCode.TARGET_MISMATCH, True),
+        ("scope-mismatch", PolicyReasonCode.TARGET_SCOPE_MISMATCH, True),
+    ],
 )
-def test_structurally_valid_l3_uses_the_unavailable_confirmation_reason(
+def test_l3_capability_boundaries_remain_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
-    rule_variant: str,
+    denial_case: str,
+    expected_reason: PolicyReasonCode,
+    identity_resolved: bool,
 ) -> None:
-    """L3 is hard-denied before ordinary capability authorization checks."""
+    """L3 gating never masks missing identity, rule, operator, target, or scope."""
     metadata = make_metadata(risk_level=RiskLevel.L3)
-    authoritative_metadata: tuple[ToolMetadata, ...]
-    if rule_variant == "missing-capability":
+    authoritative_metadata: tuple[ToolMetadata, ...] = (metadata,)
+    rules = (make_rule(metadata),)
+    plan = make_plan(metadata)
+    context = make_context()
+
+    if denial_case == "missing-rule":
         unrelated = metadata.model_copy(update={"version": "9.9.9"})
         authoritative_metadata = (metadata, unrelated)
         rules = (make_rule(unrelated, rule_id="unrelated-rule"),)
-    else:
-        authoritative_metadata = (metadata,)
+    elif denial_case == "wrong-operator":
         rules = (
             make_rule(
                 metadata,
@@ -421,19 +667,52 @@ def test_structurally_valid_l3_uses_the_unavailable_confirmation_reason(
                 operator_id="different-user",
             ),
         )
+    elif denial_case == "unknown-tool-identity":
+        unknown = plan.steps[0].model_copy(update={"tool_id": "unknown_tool"})
+        plan = plan.model_copy(update={"steps": (unknown,)})
+    elif denial_case == "integrity-mismatch":
+        tampered = plan.steps[0].model_copy(update={"contract_hash": "d" * 64})
+        plan = plan.model_copy(update={"steps": (tampered,)})
+    elif denial_case == "target-mismatch":
+        context = make_context(
+            target=TargetReference(
+                target_id="different-target",
+                resource_type="local_system",
+                resource_id="different-target",
+            )
+        )
+    elif denial_case == "scope-mismatch":
+        metadata = make_metadata(
+            risk_level=RiskLevel.L3,
+            resource_type="other_resource",
+        )
+        authoritative_metadata = (metadata,)
+        rules = (make_rule(metadata),)
+        plan = make_plan(metadata)
+    else:
+        raise AssertionError("Unknown L3 denial test case")
+
     engine = make_synthetic_engine(
         monkeypatch,
         metadata=authoritative_metadata,
         rules=rules,
     )
 
-    decision = engine.evaluate(make_plan(metadata), make_context())
+    decision = engine.evaluate(plan, context)
 
     assert decision.effect is PolicyEffect.DENY
-    assert decision.reason_code is PolicyReasonCode.L3_CONFIRMATION_UNAVAILABLE
-    assert decision.effective_risk is RiskLevel.L3
-    assert decision.approval_requirement is PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL
-    assert decision.manual_confirmation_requirement is ManualConfirmationRequirement.PER_INVOCATION
+    assert decision.reason_code is expected_reason
+    assert decision.reason_code is not PolicyReasonCode.L3_CONFIRMATION_UNAVAILABLE
+    if identity_resolved:
+        assert decision.effective_risk is RiskLevel.L3
+        assert decision.approval_requirement is PolicyApprovalRequirement.HUMAN_PLAN_APPROVAL
+        assert (
+            decision.manual_confirmation_requirement is ManualConfirmationRequirement.PER_INVOCATION
+        )
+    else:
+        assert decision.effective_risk is None
+        assert decision.approval_requirement is None
+        assert decision.manual_confirmation_requirement is None
 
 
 @pytest.mark.parametrize(
@@ -692,7 +971,7 @@ def test_any_denied_step_denies_the_entire_plan(
         ),
         (
             RiskLevel.L3,
-            PolicyReasonCode.L3_CONFIRMATION_UNAVAILABLE,
+            PolicyReasonCode.UNKNOWN_TOOL,
             ManualConfirmationRequirement.PER_INVOCATION,
         ),
     ],
@@ -823,12 +1102,12 @@ def test_execution_plan_subclass_is_rejected_without_leaking() -> None:
     malicious = MaliciousExecutionPlan.model_validate(
         plan.model_dump()
         | {
-            "steps": [
+            "steps": (
                 plan.steps[0].model_dump()
                 | {
                     "reason": marker,
-                }
-            ],
+                },
+            ),
         }
     )
 
